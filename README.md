@@ -1,7 +1,6 @@
 # org-asana.el
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![MELPA](https://melpa.org/packages/org-asana-badge.svg)](https://melpa.org/#/org-asana) [not added]
 
 Two-way synchronization between Emacs Org-mode and Asana tasks.
 
@@ -18,11 +17,12 @@ Two-way synchronization between Emacs Org-mode and Asana tasks.
 
 ## Installation
 
-### Via MELPA (Recommended) [not yet added]
+### Via use-package with :vc (Recommended)
 
 ```elisp
 (use-package org-asana
-  :ensure t
+  :vc (:url "https://github.com/wtheesfeld/org-asana"
+       :rev :newest)
   :after org
   :config
   (setq org-asana-token "your-personal-access-token")
@@ -31,14 +31,18 @@ Two-way synchronization between Emacs Org-mode and Asana tasks.
 
 ### Manual Installation
 
-1. Download `org-asana.el` to your Emacs load path
-2. Add to your init file:
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/wtheesfeld/org-asana.git
+   ```
 
-```elisp
-(require 'org-asana)
-(setq org-asana-token "your-personal-access-token")
-(org-asana-setup)
-```
+2. Add to your Emacs load path and configure:
+   ```elisp
+   (add-to-list 'load-path "/path/to/org-asana")
+   (require 'org-asana)
+   (setq org-asana-token "your-personal-access-token")
+   (org-asana-setup)
+   ```
 
 ## Quick Start
 
@@ -64,7 +68,8 @@ Two-way synchronization between Emacs Org-mode and Asana tasks.
 
 ```elisp
 (use-package org-asana
-  :ensure t
+  :vc (:url "https://github.com/wtheesfeld/org-asana"
+       :rev :newest)
   :after org
   :config
   ;; Required: Your Asana Personal Access Token
@@ -128,6 +133,7 @@ Two-way synchronization between Emacs Org-mode and Asana tasks.
 | `org-asana-sync-priority` | `t` | Sync org priority with Asana priority |
 | `org-asana-org-file` | `nil` | Specific org file for tasks (current buffer if nil) |
 | `org-asana-heading-level` | `2` | Heading level for imported tasks |
+| `org-asana-sync-only-with-due-dates` | `nil` | Only sync tasks that have due dates |
 
 ## Usage
 
@@ -172,6 +178,15 @@ Two-way synchronization between Emacs Org-mode and Asana tasks.
 | `:ASANA_MODIFIED:` | `modified_at` | Last modification time |
 | `:ASANA_ASSIGNEE:` | `assignee.gid` | Assigned user |
 | `:ASANA_PROJECTS:` | `projects` | Associated projects |
+
+### Handling Completed Tasks
+
+org-asana handles completed tasks intelligently:
+
+- **Existing tasks**: Always synced bidirectionally, including completion status changes
+- **New completed tasks**: Not imported from Asana (keeps your org files clean)
+- **Local completed tasks**: Synced to Asana when marked as DONE
+- **Filtering options**: Use `org-asana-sync-only-with-due-dates` to sync only tasks with deadlines
 
 ### Example Org Entry
 

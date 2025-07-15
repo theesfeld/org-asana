@@ -103,46 +103,46 @@ Only used when `org-asana-sync-method' is 'periodic."
   :group 'org-asana)
 
 (defcustom org-asana-conflict-resolution 'newest-wins
-  "Strategy for resolving conflicts when both sides have changes.
-'newest-wins compares modification timestamps and keeps most recent.
-'asana-wins always prefers Asana data over Org-mode data."
-  :type '(choice (const :tag "Prefer newest modification" newest-wins)
-                 (const :tag "Always prefer Asana" asana-wins))
+  "Strategy for resolving conflicts between Org and Asana data.
+'newest-wins uses modification timestamps to determine winner.
+'asana-wins always prefers Asana data over Org data."
+  :type '(choice (const :tag "Newest modification wins" newest-wins)
+                 (const :tag "Asana always wins" asana-wins))
   :group 'org-asana)
 
 (defcustom org-asana-default-workspace nil
-  "Default workspace GID for operations.
-If nil, will use the first available workspace."
-  :type '(choice (const :tag "Auto-select first workspace" nil)
+  "Default Asana workspace GID to use for operations.
+When nil, the first available workspace will be used."
+  :type '(choice (const :tag "Auto-select workspace" nil)
                  (string :tag "Workspace GID"))
   :group 'org-asana)
 
 (defcustom org-asana-default-project nil
-  "Default project GID for new tasks.
-If nil, tasks will be created in 'My Tasks'."
-  :type '(choice (const :tag "My Tasks" nil)
+  "Default Asana project GID for new tasks.
+When nil, tasks will be created in 'My Tasks' only."
+  :type '(choice (const :tag "My Tasks only" nil)
                  (string :tag "Project GID"))
   :group 'org-asana)
 
 (defcustom org-asana-sync-tags t
-  "Whether to synchronize org tags with Asana tags."
+  "Whether to synchronize Org tags with Asana tags."
   :type 'boolean
   :group 'org-asana)
 
 (defcustom org-asana-sync-priority t
-  "Whether to synchronize org priority with Asana priority."
+  "Whether to synchronize Org priority with Asana priority."
   :type 'boolean
   :group 'org-asana)
 
 (defcustom org-asana-org-file nil
-  "Specific org file to use for Asana tasks.
-If nil, will use the current buffer when syncing."
+  "Org file to use for Asana task synchronization.
+When nil, tasks will be added to the current buffer."
   :type '(choice (const :tag "Current buffer" nil)
-                 (file :tag "Org file path"))
+                 (file :tag "Specific org file"))
   :group 'org-asana)
 
 (defcustom org-asana-heading-level 2
-  "Org heading level to use for imported Asana tasks."
+  "Org heading level to use for Asana tasks."
   :type 'integer
   :group 'org-asana)
 
@@ -151,601 +151,164 @@ If nil, will use the current buffer when syncing."
 (defvar org-asana--sync-timer nil
   "Timer object for periodic synchronization.")
 
-(defvar org-asana--last-sync-time nil
-  "Timestamp of last successful synchronization.")
+(defvar org-asana--rate-limit-tracker nil
+  "Tracker for API rate limiting.")
 
-(defvar org-asana--workspaces nil
-  "Cache of available workspaces.")
+(defvar org-asana--cached-workspaces nil
+  "Cached list of available workspaces.")
 
-(defvar org-asana--projects nil
-  "Cache of available projects.")
-
-(defvar org-asana--rate-limit-remaining nil
-  "Remaining API requests before rate limit.")
-
-(defvar org-asana--rate-limit-reset-time nil
-  "Time when rate limit resets.")
+(defvar org-asana--cached-projects nil
+  "Cached list of available projects.")
 
 ;;; Utility Functions
 
-(defun org-asana--format-timestamp (time)
-  "Format TIME as ISO 8601 timestamp."
-  (format-time-string "%Y-%m-%dT%H:%M:%S.000Z" time t))
+(defun org-asana--get-token ()
+  "Get the configured Asana token."
+  (or org-asana-token
+      (error "Asana token not configured. Set `org-asana-token' or run `org-asana-setup'")))
 
-(defun org-asana--parse-timestamp (timestamp-str)
-  "Parse ISO 8601 TIMESTAMP-STR to Emacs time."
-  (when timestamp-str
-    (date-to-time timestamp-str)))
+(defun org-asana--http-headers ()
+  "Return HTTP headers for Asana API requests."
+  `(("Authorization" . ,(format "Bearer %s" (org-asana--get-token)))
+    ("Content-Type" . "application/json")
+    ("Accept" . "application/json")))
 
-(defun org-asana--current-timestamp ()
-  "Get current time as ISO 8601 timestamp string."
-  (org-asana--format-timestamp (current-time)))
+(defun org-asana--api-url (endpoint)
+  "Construct full API URL for ENDPOINT."
+  (concat org-asana-api-base-url endpoint))
 
-(defun org-asana--safe-get (alist key)
-  "Safely get KEY from ALIST, returning nil if not found."
-  (cdr (assoc key alist)))
+(defun org-asana--parse-json-response (buffer)
+  "Parse JSON response from BUFFER."
+  (with-current-buffer buffer
+    (goto-char (point-min))
+    (re-search-forward "^$" nil t)
+    (json-parse-buffer :object-type 'alist :array-type 'list)))
 
-(defun org-asana--get-property (property)
-  "Get org PROPERTY at current heading."
-  (org-entry-get nil property))
+(defun org-asana--handle-http-error (status)
+  "Handle HTTP error STATUS."
+  (cond
+   ((= status 401) (error "Asana authentication failed. Check your token"))
+   ((= status 403) (error "Asana access forbidden. Check token permissions"))
+   ((= status 404) (error "Asana resource not found"))
+   ((= status 429) (error "Asana rate limit exceeded. Please wait"))
+   ((>= status 500) (error "Asana server error (%d)" status))
+   (t (error "Asana API error (%d)" status))))
 
-(defun org-asana--set-property (property value)
-  "Set org PROPERTY to VALUE at current heading."
-  (org-entry-put nil property value))
+;;; Authentication and Setup Functions
 
-(defun org-asana--task-id ()
-  "Get Asana task ID from current org heading."
-  (org-asana--get-property "ASANA_TASK_ID"))
-
-(defun org-asana--set-task-id (task-id)
-  "Set Asana TASK-ID for current org heading."
-  (org-asana--set-property "ASANA_TASK_ID" task-id))
-
-(defun org-asana--modified-time ()
-  "Get modification time from current org heading."
-  (org-asana--get-property "ASANA_MODIFIED"))
-
-(defun org-asana--set-modified-time (time-str)
-  "Set modification TIME-STR for current org heading."
-  (org-asana--set-property "ASANA_MODIFIED" time-str))
-
-(defun org-asana--get-heading-text ()
-  "Get the heading text without TODO keywords or tags."
-  (nth 4 (org-heading-components)))
-
-(defun org-asana--get-todo-state ()
-  "Get TODO state of current heading."
-  (nth 2 (org-heading-components)))
-
-(defun org-asana--get-priority ()
-  "Get priority of current heading as string."
-  (when-let ((priority (nth 3 (org-heading-components))))
-    (char-to-string priority)))
-
-(defun org-asana--get-tags ()
-  "Get tags of current heading as list."
-  (nth 5 (org-heading-components)))
-
-(defun org-asana--get-deadline ()
-  "Get deadline of current heading as timestamp."
-  (org-entry-get nil "DEADLINE"))
-
-(defun org-asana--get-entry-body ()
-  "Get body text of current org entry."
-  (save-excursion
-    (org-back-to-heading t)
-    (let ((start (progn (outline-next-heading) (point)))
-          (end (progn (outline-next-heading) (point))))
-      (string-trim (buffer-substring-no-properties start end)))))
-
-;;; Authentication and Setup
-
-(defun org-asana--headers ()
-  "Get HTTP headers for Asana API requests."
+(defun org-asana-authenticate ()
+  "Authenticate with Asana API using configured token."
   (unless org-asana-token
-    (error "Asana token not configured. Set org-asana-token or run org-asana-setup"))
-  `(("Authorization" . ,(concat "Bearer " org-asana-token))
-    ("Content-Type" . "application/json")))
-
-(defun org-asana--api-request (method endpoint &optional data)
-  "Make API request with METHOD to ENDPOINT with optional DATA."
-  (let* ((url (concat org-asana-api-base-url endpoint))
-         (url-request-method method)
-         (url-request-extra-headers (org-asana--headers))
-         (url-request-data (when data (json-encode data)))
-         (buffer (url-retrieve-synchronously url t t)))
-    (when buffer
-      (with-current-buffer buffer
-        (goto-char (point-min))
-        (search-forward "\n\n" nil t)
-        (let ((response (buffer-substring-no-properties (point) (point-max))))
-          (kill-buffer)
-          (condition-case nil
-              (json-read-from-string response)
-            (error nil)))))))
+    (error "No Asana token configured. Run `org-asana-setup' first"))
+  (org-asana-test-connection))
 
 (defun org-asana-test-connection ()
   "Test connection to Asana API."
   (interactive)
-  (condition-case err
-      (let ((me (org-asana--api-request "GET" "/users/me")))
-        (if (org-asana--safe-get me 'data)
-            (message "Connection successful! Connected as: %s"
-                     (org-asana--safe-get (org-asana--safe-get me 'data) 'name))
-          (message "Connection failed: Invalid response")))
-    (error (message "Connection failed: %s" (error-message-string err)))))
-
-;;; Data Transformation Functions
-
-(defun org-asana--priority-to-asana (org-priority)
-  "Convert org ORG-PRIORITY ([A], [B], [C]) to Asana priority."
-  (when org-priority
-    (pcase org-priority
-      ("A" "high")
-      ("B" "medium")
-      ("C" "low")
-      (_ "medium"))))
-
-(defun org-asana--priority-from-asana (asana-priority)
-  "Convert Asana ASANA-PRIORITY to org priority character."
-  (pcase asana-priority
-    ("high" "A")
-    ("medium" "B")
-    ("low" "C")
-    (_ "B")))
-
-(defun org-asana--date-to-asana (org-date)
-  "Convert org date ORG-DATE to Asana date format."
-  (when org-date
-    (let ((time (org-time-string-to-time org-date)))
-      (format-time-string "%Y-%m-%d" time))))
-
-(defun org-asana--date-from-asana (asana-date)
-  "Convert Asana ASANA-DATE to org timestamp."
-  (when asana-date
-    (format "<%s>" asana-date)))
-
-(defun org-asana--task-to-org-entry (task)
-  "Convert Asana TASK to org entry format."
-  (let* ((data (org-asana--safe-get task 'data))
-         (name (org-asana--safe-get data 'name))
-         (completed (org-asana--safe-get data 'completed))
-         (due-date (org-asana--safe-get data 'due_date))
-         (notes (org-asana--safe-get data 'notes))
-         (tags (org-asana--safe-get data 'tags))
-         (priority (org-asana--safe-get data 'priority))
-         (modified-at (org-asana--safe-get data 'modified_at))
-         (task-id (org-asana--safe-get data 'gid))
-         (assignee (org-asana--safe-get data 'assignee))
-         (projects (org-asana--safe-get data 'projects)))
-    `((heading . ,name)
-      (todo-state . ,(if completed "DONE" "TODO"))
-      (priority . ,(when org-asana-sync-priority
-                     (org-asana--priority-from-asana priority)))
-      (deadline . ,(org-asana--date-from-asana due-date))
-      (tags . ,(when org-asana-sync-tags
-                 (mapcar (lambda (tag)
-                           (org-asana--safe-get tag 'name))
-                         tags)))
-      (body . ,notes)
-      (task-id . ,task-id)
-      (modified . ,modified-at)
-      (assignee . ,(when assignee (org-asana--safe-get assignee 'gid)))
-      (projects . ,(mapcar (lambda (proj)
-                             (org-asana--safe-get proj 'gid))
-                           projects)))))
-
-(defun org-asana--org-entry-to-task ()
-  "Convert current org entry to Asana task format."
-  (let ((heading (org-asana--get-heading-text))
-        (todo-state (org-asana--get-todo-state))
-        (priority (org-asana--get-priority))
-        (deadline (org-asana--get-deadline))
-        (tags (org-asana--get-tags))
-        (body (org-asana--get-entry-body)))
-    `((name . ,heading)
-      (completed . ,(string= todo-state "DONE"))
-      (due_date . ,(org-asana--date-to-asana deadline))
-      (notes . ,body)
-      ,(when org-asana-sync-priority
-         `(priority . ,(org-asana--priority-to-asana priority)))
-      ,(when (and org-asana-sync-tags tags)
-         `(tag_names . ,tags)))))
-
-;;; API Interface Functions
-
-(defun org-asana--fetch-my-tasks ()
-  "Fetch user's tasks from Asana."
-  (let ((endpoint "/tasks")
-        (params "?assignee=me&completed_since=now&opt_fields=name,completed,due_date,notes,tags.name,priority,modified_at,gid,assignee.gid,projects.gid"))
-    (org-asana--api-request "GET" (concat endpoint params))))
-
-(defun org-asana--fetch-task (task-id)
-  "Fetch specific task by TASK-ID from Asana."
-  (let ((endpoint (format "/tasks/%s" task-id))
-        (params "?opt_fields=name,completed,due_date,notes,tags.name,priority,modified_at,gid,assignee.gid,projects.gid"))
-    (org-asana--api-request "GET" (concat endpoint params))))
-
-(defun org-asana--create-task (task-data)
-  "Create new task in Asana with TASK-DATA."
-  (let ((data `((data . ,task-data))))
-    (org-asana--api-request "POST" "/tasks" data)))
-
-(defun org-asana--update-task (task-id task-data)
-  "Update existing task TASK-ID with TASK-DATA."
-  (let ((endpoint (format "/tasks/%s" task-id))
-        (data `((data . ,task-data))))
-    (org-asana--api-request "PUT" endpoint data)))
-
-(defun org-asana--delete-task (task-id)
-  "Delete task with TASK-ID from Asana."
-  (let ((endpoint (format "/tasks/%s" task-id)))
-    (org-asana--api-request "DELETE" endpoint)))
-
-(defun org-asana--fetch-workspaces ()
-  "Fetch available workspaces."
-  (org-asana--api-request "GET" "/workspaces"))
-
-(defun org-asana--fetch-projects (workspace-id)
-  "Fetch projects in WORKSPACE-ID."
-  (let ((endpoint (format "/projects?workspace=%s" workspace-id)))
-    (org-asana--api-request "GET" endpoint)))
-
-;;; Conflict Resolution
-
-(defun org-asana--compare-timestamps (org-time asana-time)
-  "Compare ORG-TIME and ASANA-TIME, return newer timestamp source.
-Returns 'org if org timestamp is newer, 'asana if asana is newer,
-or 'asana if timestamps are equal or comparison fails."
-  (condition-case nil
-      (let ((org-parsed (org-asana--parse-timestamp org-time))
-            (asana-parsed (org-asana--parse-timestamp asana-time)))
-        (cond
-         ((and org-parsed asana-parsed)
-          (if (time-less-p asana-parsed org-parsed) 'org 'asana))
-         (org-parsed 'org)
-         (asana-parsed 'asana)
-         (t 'asana)))
-    (error 'asana)))
-
-(defun org-asana--resolve-conflict (org-entry asana-task)
-  "Resolve conflict between ORG-ENTRY and ASANA-TASK.
-Returns the entry that should be used as source of truth."
-  (pcase org-asana-conflict-resolution
-    ('asana-wins asana-task)
-    ('newest-wins
-     (let ((org-modified (org-asana--safe-get org-entry 'modified))
-           (asana-modified (org-asana--safe-get asana-task 'modified)))
-       (if (eq (org-asana--compare-timestamps org-modified asana-modified) 'org)
-           org-entry
-         asana-task)))
-    (_ asana-task)))
-
-;;; Synchronization Functions
-
-(defun org-asana--sync-from-asana-to-org (asana-task)
-  "Update org entry from ASANA-TASK."
-  (let* ((task-data (org-asana--safe-get asana-task 'data))
-         (task-id (org-asana--safe-get task-data 'gid))
-         (org-entry (org-asana--task-to-org-entry asana-task)))
-    (save-excursion
-      (goto-char (point-min))
-      (if (re-search-forward (format ":ASANA_TASK_ID: %s" task-id) nil t)
-          ;; Update existing entry
-          (progn
-            (org-back-to-heading t)
-            (org-asana--update-org-entry-from-data org-entry))
-        ;; Create new entry
-        (org-asana--create-org-entry-from-data org-entry)))))
-
-(defun org-asana--sync-from-org-to-asana ()
-  "Update Asana task from current org entry."
-  (when-let ((task-id (org-asana--task-id)))
-    (let ((task-data (org-asana--org-entry-to-task)))
-      (org-asana--update-task task-id task-data)
-      (org-asana--set-modified-time (org-asana--current-timestamp)))))
-
-(defun org-asana--update-org-entry-from-data (org-entry)
-  "Update current org heading with ORG-ENTRY data."
-  (let ((heading (org-asana--safe-get org-entry 'heading))
-        (todo-state (org-asana--safe-get org-entry 'todo-state))
-        (priority (org-asana--safe-get org-entry 'priority))
-        (deadline (org-asana--safe-get org-entry 'deadline))
-        (tags (org-asana--safe-get org-entry 'tags))
-        (body (org-asana--safe-get org-entry 'body))
-        (task-id (org-asana--safe-get org-entry 'task-id))
-        (modified (org-asana--safe-get org-entry 'modified))
-        (assignee (org-asana--safe-get org-entry 'assignee))
-        (projects (org-asana--safe-get org-entry 'projects)))
-    
-    ;; Update heading
-    (org-edit-headline heading)
-    
-    ;; Update TODO state
-    (when todo-state
-      (org-todo todo-state))
-    
-    ;; Update priority
-    (when priority
-      (org-priority (string-to-char priority)))
-    
-    ;; Update deadline
-    (if deadline
-        (org-deadline nil deadline)
-      (org-deadline '(4)))  ; Remove deadline
-    
-    ;; Update tags
-    (when tags
-      (org-set-tags tags))
-    
-    ;; Update properties
-    (org-asana--set-task-id task-id)
-    (org-asana--set-modified-time modified)
-    (when assignee
-      (org-asana--set-property "ASANA_ASSIGNEE" assignee))
-    (when projects
-      (org-asana--set-property "ASANA_PROJECTS" 
-                               (mapconcat #'identity projects ",")))
-    
-    ;; Update body
-    (when body
-      (save-excursion
-        (org-end-of-meta-data t)
-        (delete-region (point) (save-excursion (outline-next-heading) (point)))
-        (insert body "\n")))))
-
-(defun org-asana--create-org-entry-from-data (org-entry)
-  "Create new org entry from ORG-ENTRY data."
-  (let ((heading (org-asana--safe-get org-entry 'heading))
-        (todo-state (org-asana--safe-get org-entry 'todo-state))
-        (priority (org-asana--safe-get org-entry 'priority))
-        (deadline (org-asana--safe-get org-entry 'deadline))
-        (tags (org-asana--safe-get org-entry 'tags))
-        (body (org-asana--safe-get org-entry 'body))
-        (task-id (org-asana--safe-get org-entry 'task-id))
-        (modified (org-asana--safe-get org-entry 'modified))
-        (assignee (org-asana--safe-get org-entry 'assignee))
-        (projects (org-asana--safe-get org-entry 'projects)))
-    
-    ;; Go to end of buffer
-    (goto-char (point-max))
-    
-    ;; Insert heading
-    (insert (format "%s %s %s%s%s\n"
-                    (make-string org-asana-heading-level ?*)
-                    (or todo-state "TODO")
-                    (if priority (format "[#%s] " priority) "")
-                    heading
-                    (if tags (format " :%s:" (mapconcat #'identity tags ":")) "")))
-    
-    ;; Add deadline if present
-    (when deadline
-      (insert "DEADLINE: " deadline "\n"))
-    
-    ;; Add properties
-    (insert ":PROPERTIES:\n")
-    (insert (format ":ASANA_TASK_ID: %s\n" task-id))
-    (insert (format ":ASANA_MODIFIED: %s\n" modified))
-    (when assignee
-      (insert (format ":ASANA_ASSIGNEE: %s\n" assignee)))
-    (when projects
-      (insert (format ":ASANA_PROJECTS: %s\n" 
-                       (mapconcat #'identity projects ","))))
-    (insert ":END:\n")
-    
-    ;; Add body
-    (when body
-      (insert body "\n"))
-    
-    (insert "\n")))
-
-;;; Interactive Commands
-
-(defun org-asana-sync ()
-  "Perform bidirectional synchronization between Org-mode and Asana."
-  (interactive)
-  (unless org-asana-token
-    (error "Asana token not configured. Run M-x org-asana-setup"))
-  
-  (message "Starting Asana synchronization...")
-  
-  (condition-case err
-      (let ((asana-tasks (org-asana--fetch-my-tasks))
-            (synced-count 0))
-        
-        ;; Sync from Asana to Org
-        (when-let ((tasks (org-asana--safe-get asana-tasks 'data)))
-          (dolist (task tasks)
-            (org-asana--sync-from-asana-to-org task)
-            (setq synced-count (1+ synced-count))))
-        
-        ;; Sync from Org to Asana (scan current buffer for entries with task IDs)
-        (save-excursion
+  (let* ((url (org-asana--api-url "/users/me"))
+         (url-request-method "GET")
+         (url-request-extra-headers (org-asana--http-headers))
+         (buffer (url-retrieve-synchronously url)))
+    (unwind-protect
+        (with-current-buffer buffer
           (goto-char (point-min))
-          (while (re-search-forward ":ASANA_TASK_ID:" nil t)
-            (org-back-to-heading t)
-            (org-asana--sync-from-org-to-asana)))
-        
-        (setq org-asana--last-sync-time (current-time))
-        (message "Synchronization complete. Processed %d tasks." synced-count))
-    
-    (error (message "Synchronization failed: %s" (error-message-string err)))))
+          (if (re-search-forward "^HTTP/[0-9.]+ \\([0-9]+\\)" nil t)
+              (let ((status (string-to-number (match-string 1))))
+                (if (= status 200)
+                    (progn
+                      (message "Asana connection successful")
+                      t)
+                  (org-asana--handle-http-error status)))
+            (error "Invalid HTTP response from Asana")))
+      (kill-buffer buffer))))
 
-(defun org-asana-create-task-from-heading ()
-  "Create Asana task from current org heading."
-  (interactive)
-  (unless org-asana-token
-    (error "Asana token not configured. Run M-x org-asana-setup"))
-  
-  (unless (org-at-heading-p)
-    (error "Not at an org heading"))
-  
-  (when (org-asana--task-id)
-    (error "This heading already has an associated Asana task"))
-  
-  (condition-case err
-      (let* ((task-data (org-asana--org-entry-to-task))
-             (response (org-asana--create-task task-data))
-             (task (org-asana--safe-get response 'data)))
-        (when task
-          (let ((task-id (org-asana--safe-get task 'gid)))
-            (org-asana--set-task-id task-id)
-            (org-asana--set-modified-time (org-asana--current-timestamp))
-            (message "Created Asana task: %s" task-id))))
-    (error (message "Failed to create task: %s" (error-message-string err)))))
-
-(defun org-asana-import-my-tasks ()
-  "Import all 'My Tasks' from Asana to current org buffer."
-  (interactive)
-  (unless org-asana-token
-    (error "Asana token not configured. Run M-x org-asana-setup"))
-  
-  (condition-case err
-      (let ((asana-tasks (org-asana--fetch-my-tasks))
-            (imported-count 0))
-        (when-let ((tasks (org-asana--safe-get asana-tasks 'data)))
-          (dolist (task tasks)
-            (let* ((task-data (org-asana--safe-get task 'data))
-                   (task-id (org-asana--safe-get task-data 'gid)))
-              (save-excursion
-                (goto-char (point-min))
-                (unless (re-search-forward (format ":ASANA_TASK_ID: %s" task-id) nil t)
-                  (org-asana--sync-from-asana-to-org task)
-                  (setq imported-count (1+ imported-count))))))
-          (message "Imported %d new tasks from Asana." imported-count)))
-    (error (message "Import failed: %s" (error-message-string err)))))
-
-(defun org-asana-open-in-asana ()
-  "Open current task in Asana web interface."
-  (interactive)
-  (when-let ((task-id (org-asana--task-id)))
-    (browse-url (format "https://app.asana.com/0/0/%s" task-id))
-    (message "Opened task in Asana"))
-  (unless (org-asana--task-id)
-    (error "No Asana task associated with this heading")))
-
-(defun org-asana-update-from-heading ()
-  "Update Asana task from current org heading."
-  (interactive)
-  (unless (org-at-heading-p)
-    (error "Not at an org heading"))
-  
-  (unless (org-asana--task-id)
-    (error "No Asana task associated with this heading"))
-  
-  (org-asana--sync-from-org-to-asana)
-  (message "Updated Asana task"))
-
-(defun org-asana-delete-task ()
-  "Delete Asana task for current heading."
-  (interactive)
-  (unless (org-at-heading-p)
-    (error "Not at an org heading"))
-  
-  (when-let ((task-id (org-asana--task-id)))
-    (when (yes-or-no-p "Delete Asana task? ")
-      (condition-case err
-          (progn
-            (org-asana--delete-task task-id)
-            (org-delete-property "ASANA_TASK_ID")
-            (org-delete-property "ASANA_MODIFIED")
-            (org-delete-property "ASANA_ASSIGNEE")
-            (org-delete-property "ASANA_PROJECTS")
-            (message "Deleted Asana task"))
-        (error (message "Failed to delete task: %s" (error-message-string err))))))
-  (unless (org-asana--task-id)
-    (error "No Asana task associated with this heading")))
-
-;;; Setup and Configuration
-
+;;;###autoload
 (defun org-asana-setup ()
-  "Interactive setup wizard for org-asana."
+  "Setup org-asana with initial configuration wizard."
   (interactive)
-  
-  ;; Get token
   (unless org-asana-token
-    (setq org-asana-token 
+    (setq org-asana-token
           (read-string "Enter your Asana Personal Access Token: ")))
   
-  ;; Test connection
-  (condition-case err
-      (org-asana-test-connection)
-    (error 
-     (message "Connection test failed: %s" (error-message-string err))
-     (return)))
-  
-  ;; Configure sync method
-  (let ((sync-method 
-         (intern (completing-read "Sync method: " '("manual" "periodic") nil t))))
-    (setq org-asana-sync-method sync-method)
+  (if (org-asana-test-connection)
+      (progn
+        (when (y-or-n-p "Configure sync method? ")
+          (let ((method (completing-read 
+                        "Sync method: " 
+                        '("manual" "periodic") nil t)))
+            (setq org-asana-sync-method (intern method))
+            (when (eq org-asana-sync-method 'periodic)
+              (let ((interval (read-number "Sync interval (minutes): " 15)))
+                (setq org-asana-sync-interval interval)))))
+        
+        (when (y-or-n-p "Set default org file for Asana tasks? ")
+          (let ((file (read-file-name "Org file: " nil nil nil nil
+                                     (lambda (name) (string-suffix-p ".org" name)))))
+            (setq org-asana-org-file file)))
+        
+        (when (y-or-n-p "Configure sync options? ")
+          (setq org-asana-sync-tags 
+                (y-or-n-p "Sync org tags with Asana tags? "))
+          (setq org-asana-sync-priority 
+                (y-or-n-p "Sync org priority with Asana priority? "))
+          (let ((conflict-method 
+                 (completing-read 
+                  "Conflict resolution strategy: "
+                  '("newest-wins" "asana-wins") nil t)))
+            (setq org-asana-conflict-resolution (intern conflict-method))))
+        
+        (when (y-or-n-p "Save configuration to init file? ")
+          (org-asana--save-configuration))
+        
+        (message "org-asana setup complete!")
+        (when (eq org-asana-sync-method 'periodic)
+          (org-asana-start-periodic-sync)))
+    (setq org-asana-token nil)
+    (error "Setup failed. Please check your token")))
+
+(defun org-asana--save-configuration ()
+  "Save current org-asana configuration to user's init file."
+  (let ((config-string 
+         (format "
+;; org-asana configuration
+(setq org-asana-token \"%s\"
+      org-asana-sync-method '%s
+      org-asana-sync-interval %d
+      org-asana-conflict-resolution '%s
+      org-asana-sync-tags %s
+      org-asana-sync-priority %s%s)
+"
+                 org-asana-token
+                 org-asana-sync-method
+                 org-asana-sync-interval
+                 org-asana-conflict-resolution
+                 org-asana-sync-tags
+                 org-asana-sync-priority
+                 (if org-asana-org-file
+                     (format "\n      org-asana-org-file \"%s\"" org-asana-org-file)
+                   ""))))
     
-    (when (eq sync-method 'periodic)
-      (setq org-asana-sync-interval 
-            (read-number "Sync interval (minutes): " org-asana-sync-interval))))
-  
-  ;; Configure conflict resolution
-  (setq org-asana-conflict-resolution
-        (intern (completing-read "Conflict resolution: " 
-                                '("newest-wins" "asana-wins") nil t)))
-  
-  ;; Configure workspace and project
-  (org-asana-configure-workspace)
-  
-  ;; Save configuration option
-  (when (yes-or-no-p "Save configuration to init file? ")
-    (org-asana--save-configuration))
-  
-  ;; Start periodic sync if enabled
-  (when (eq org-asana-sync-method 'periodic)
-    (org-asana--start-periodic-sync))
-  
-  (message "org-asana setup complete!"))
+    (with-temp-buffer
+      (insert config-string)
+      (append-to-file (point-min) (point-max) user-init-file))
+    (message "Configuration saved to %s" user-init-file)))
 
 (defun org-asana-configure-workspace ()
-  "Configure default workspace interactively."
+  "Configure default Asana workspace."
   (interactive)
-  (condition-case err
-      (let* ((workspaces-response (org-asana--fetch-workspaces))
-             (workspaces (org-asana--safe-get workspaces-response 'data)))
-        (when workspaces
-          (let* ((workspace-names (mapcar (lambda (ws)
-                                           (cons (org-asana--safe-get ws 'name)
-                                                 (org-asana--safe-get ws 'gid)))
-                                         workspaces))
-                 (selected-name (completing-read "Select workspace: " 
-                                               workspace-names nil t))
-                 (selected-gid (cdr (assoc selected-name workspace-names))))
-            (setq org-asana-default-workspace selected-gid)
-            (message "Default workspace set to: %s" selected-name)
-            
-            ;; Configure project in selected workspace
-            (org-asana-configure-project))))
-    (error (message "Failed to configure workspace: %s" (error-message-string err)))))
-
-(defun org-asana-configure-project ()
-  "Configure default project interactively."
-  (interactive)
-  (when org-asana-default-workspace
-    (condition-case err
-        (let* ((projects-response (org-asana--fetch-projects org-asana-default-workspace))
-               (projects (org-asana--safe-get projects-response 'data)))
-          (when projects
-            (let* ((project-names (append '(("My Tasks" . nil))
-                                         (mapcar (lambda (proj)
-                                                  (cons (org-asana--safe-get proj 'name)
-                                                        (org-asana--safe-get proj 'gid)))
-                                                projects)))
-                   (selected-name (completing-read "Select default project: " 
-                                                 project-names nil t))
-                   (selected-gid (cdr (assoc selected-name project-names))))
-              (setq org-asana-default-project selected-gid)
-              (message "Default project set to: %s" selected-name))))
-      (error (message "Failed to configure project: %s" (error-message-string err))))))
+  (let* ((workspaces (org-asana-fetch-workspaces))
+         (workspace-names (mapcar (lambda (ws) 
+                                   (cons (alist-get 'name ws) 
+                                         (alist-get 'gid ws)))
+                                 workspaces))
+         (selected (completing-read "Select workspace: " workspace-names nil t)))
+    (setq org-asana-default-workspace (cdr (assoc selected workspace-names)))
+    (message "Default workspace set to: %s" selected)))
 
 (defun org-asana-reset-configuration ()
   "Reset org-asana configuration to defaults."
   (interactive)
-  (when (yes-or-no-p "Reset all org-asana configuration? ")
+  (when (y-or-n-p "Reset all org-asana configuration? ")
     (setq org-asana-token nil
           org-asana-sync-method 'manual
           org-asana-sync-interval 15
@@ -756,135 +319,749 @@ Returns the entry that should be used as source of truth."
           org-asana-sync-priority t
           org-asana-org-file nil
           org-asana-heading-level 2)
-    (org-asana--stop-periodic-sync)
-    (message "Configuration reset to defaults")))
+    (org-asana-stop-periodic-sync)
+    (message "org-asana configuration reset to defaults")))
 
-(defun org-asana--save-configuration ()
-  "Save current configuration to user's init file."
-  (let ((config-string 
-         (format ";; org-asana configuration\n(setq org-asana-token \"%s\"\n      org-asana-sync-method '%s\n      org-asana-sync-interval %d\n      org-asana-conflict-resolution '%s\n      org-asana-default-workspace %s\n      org-asana-default-project %s\n      org-asana-sync-tags %s\n      org-asana-sync-priority %s\n      org-asana-org-file %s\n      org-asana-heading-level %d)\n"
-                 (or org-asana-token "")
-                 org-asana-sync-method
-                 org-asana-sync-interval
-                 org-asana-conflict-resolution
-                 (if org-asana-default-workspace 
-                     (format "\"%s\"" org-asana-default-workspace) 
-                   "nil")
-                 (if org-asana-default-project 
-                     (format "\"%s\"" org-asana-default-project) 
-                   "nil")
-                 org-asana-sync-tags
-                 org-asana-sync-priority
-                 (if org-asana-org-file 
-                     (format "\"%s\"" org-asana-org-file) 
-                   "nil")
-                 org-asana-heading-level)))
-    (append-to-file config-string nil user-init-file)
-    (message "Configuration saved to %s" user-init-file)))
+;;; Pure Data Transformation Functions
 
-;;; Periodic Sync
+(defun org-asana--format-org-heading (level text)
+  "Format org heading at LEVEL with TEXT."
+  (concat (make-string level ?*) " " text))
 
-(defun org-asana--start-periodic-sync ()
+(defun org-asana--parse-asana-timestamp (timestamp-str)
+  "Parse Asana timestamp string to Emacs time."
+  (when timestamp-str
+    (date-to-time timestamp-str)))
+
+(defun org-asana--format-org-timestamp (time)
+  "Format Emacs TIME to org timestamp."
+  (when time
+    (format-time-string "<%Y-%m-%d %a>" time)))
+
+(defun org-asana--format-org-timestamp-with-time (time)
+  "Format Emacs TIME to org timestamp with time."
+  (when time
+    (format-time-string "<%Y-%m-%d %a %H:%M>" time)))
+
+(defun org-asana--get-org-todo-state (completed)
+  "Get org TODO state based on COMPLETED boolean."
+  (if completed "DONE" "TODO"))
+
+(defun org-asana--get-asana-completed (todo-state)
+  "Get Asana completed boolean from org TODO-STATE."
+  (string= todo-state "DONE"))
+
+(defun org-asana--format-org-priority (asana-priority)
+  "Convert ASANA-PRIORITY to org priority."
+  (cond
+   ((string= asana-priority "high") "[#A]")
+   ((string= asana-priority "medium") "[#B]")
+   ((string= asana-priority "low") "[#C]")
+   (t "")))
+
+(defun org-asana--get-asana-priority (org-priority)
+  "Convert org priority character to Asana priority."
+  (cond
+   ((string= org-priority "A") "high")
+   ((string= org-priority "B") "medium")
+   ((string= org-priority "C") "low")
+   (t nil)))
+
+(defun org-asana--format-org-tags (asana-tags)
+  "Convert ASANA-TAGS list to org tags string."
+  (when asana-tags
+    (concat ":" (mapconcat (lambda (tag) (alist-get 'name tag)) asana-tags ":") ":")))
+
+(defun org-asana--parse-org-tags (tags-string)
+  "Parse org TAGS-STRING to list of tag names."
+  (when (and tags-string (not (string-empty-p tags-string)))
+    (split-string (substring tags-string 1 -1) ":")))
+
+(defun org-asana-task-to-org-entry (task)
+  "Convert Asana TASK to org entry string."
+  (let* ((name (alist-get 'name task))
+         (notes (alist-get 'notes task))
+         (completed (alist-get 'completed task))
+         (due-on (alist-get 'due_on task))
+         (tags (alist-get 'tags task))
+         (gid (alist-get 'gid task))
+         (modified-at (alist-get 'modified_at task))
+         (assignee (alist-get 'assignee task))
+         (projects (alist-get 'projects task))
+         (todo-state (org-asana--get-org-todo-state completed))
+         (priority-str (org-asana--format-org-priority 
+                       (alist-get 'priority task)))
+         (tags-str (when org-asana-sync-tags
+                    (org-asana--format-org-tags tags)))
+         (deadline-str (when due-on
+                        (org-asana--format-org-timestamp
+                         (org-asana--parse-asana-timestamp due-on)))))
+    
+    (concat
+     (org-asana--format-org-heading org-asana-heading-level
+                                   (concat todo-state " " priority-str name))
+     (when tags-str (concat " " tags-str))
+     "\n"
+     (when deadline-str
+       (concat "DEADLINE: " deadline-str "\n"))
+     ":PROPERTIES:\n"
+     ":ASANA_TASK_ID: " gid "\n"
+     (when modified-at
+       (concat ":ASANA_MODIFIED: " modified-at "\n"))
+     (when assignee
+       (concat ":ASANA_ASSIGNEE: " (alist-get 'gid assignee) "\n"))
+     (when projects
+       (concat ":ASANA_PROJECTS: " 
+               (mapconcat (lambda (p) (alist-get 'gid p)) projects ",") "\n"))
+     ":END:\n"
+     (when (and notes (not (string-empty-p notes)))
+       (concat notes "\n")))))
+
+(defun org-asana-org-entry-to-task (entry-data)
+  "Convert org ENTRY-DATA to Asana task data structure."
+  (let* ((heading (plist-get entry-data :heading))
+         (todo-state (plist-get entry-data :todo-state))
+         (priority (plist-get entry-data :priority))
+         (tags (plist-get entry-data :tags))
+         (deadline (plist-get entry-data :deadline))
+         (body (plist-get entry-data :body))
+         (properties (plist-get entry-data :properties))
+         (task-id (plist-get properties :ASANA_TASK_ID))
+         (completed (org-asana--get-asana-completed todo-state))
+         (asana-priority (when org-asana-sync-priority
+                          (org-asana--get-asana-priority priority)))
+         (due-date (when deadline
+                    (format-time-string "%Y-%m-%d" deadline))))
+    
+    `((name . ,heading)
+      (notes . ,(or body ""))
+      (completed . ,completed)
+      ,@(when due-date `((due_on . ,due-date)))
+      ,@(when asana-priority `((priority . ,asana-priority)))
+      ,@(when task-id `((gid . ,task-id))))))
+
+(defun org-asana--extract-org-entry-data ()
+  "Extract org entry data at point."
+  (save-excursion
+    (org-back-to-heading t)
+    (let* ((element (org-element-at-point))
+           (heading (org-element-property :raw-value element))
+           (todo-state (org-element-property :todo-keyword element))
+           (priority (org-element-property :priority element))
+           (tags (org-element-property :tags element))
+           (deadline (org-element-property :deadline element))
+           (properties (org-entry-properties))
+           (body (org-get-entry)))
+      
+      `(:heading ,heading
+        :todo-state ,todo-state
+        :priority ,(when priority (char-to-string priority))
+        :tags ,tags
+        :deadline ,(when deadline (org-element-property :raw-value deadline))
+        :body ,body
+        :properties ,(mapcar (lambda (prop)
+                              (cons (intern (concat ":" (car prop)))
+                                    (cdr prop)))
+                            properties)))))
+
+;;; HTTP/API Interface Functions
+
+(defun org-asana--make-request (method endpoint &optional data)
+  "Make HTTP request to Asana API.
+METHOD is the HTTP method, ENDPOINT is the API path, DATA is optional JSON data."
+  (let* ((url (org-asana--api-url endpoint))
+         (url-request-method method)
+         (url-request-extra-headers (org-asana--http-headers))
+         (url-request-data (when data (json-encode data)))
+         (buffer (url-retrieve-synchronously url)))
+    
+    (unwind-protect
+        (with-current-buffer buffer
+          (goto-char (point-min))
+          (if (re-search-forward "^HTTP/[0-9.]+ \\([0-9]+\\)" nil t)
+              (let ((status (string-to-number (match-string 1))))
+                (if (and (>= status 200) (< status 300))
+                    (org-asana--parse-json-response buffer)
+                  (org-asana--handle-http-error status)))
+            (error "Invalid HTTP response from Asana")))
+      (kill-buffer buffer))))
+
+(defun org-asana-fetch-user-info ()
+  "Fetch current user information from Asana."
+  (let ((response (org-asana--make-request "GET" "/users/me")))
+    (alist-get 'data response)))
+
+(defun org-asana-fetch-workspaces ()
+  "Fetch available workspaces from Asana."
+  (let ((response (org-asana--make-request "GET" "/workspaces")))
+    (setq org-asana--cached-workspaces (alist-get 'data response))
+    org-asana--cached-workspaces))
+
+(defun org-asana--get-workspace-gid ()
+  "Get the workspace GID to use for operations."
+  (or org-asana-default-workspace
+      (let ((workspaces (or org-asana--cached-workspaces
+                           (org-asana-fetch-workspaces))))
+        (alist-get 'gid (car workspaces)))))
+
+(defun org-asana-fetch-my-tasks ()
+  "Fetch user's incomplete tasks from Asana."
+  (let* ((user-info (org-asana-fetch-user-info))
+         (user-gid (alist-get 'gid user-info))
+         (workspace-gid (org-asana--get-workspace-gid))
+         (endpoint (format "/users/%s/user_task_list?workspace=%s" 
+                          user-gid workspace-gid))
+         (task-list-response (org-asana--make-request "GET" endpoint))
+         (task-list-gid (alist-get 'gid (alist-get 'data task-list-response)))
+         ;; Fetch only incomplete tasks with limit of 100
+         (tasks-endpoint (format "/user_task_lists/%s/tasks?completed_since=now&limit=100&opt_fields=gid,name,notes,completed,due_on,due_at,modified_at,priority,tags.name,assignee.gid,projects.gid" 
+                                task-list-gid))
+         (tasks-response (org-asana--make-request "GET" tasks-endpoint))
+         (all-tasks (alist-get 'data tasks-response)))
+    ;; Filter for incomplete tasks only
+    (seq-filter (lambda (task) 
+                  (not (alist-get 'completed task)))
+                all-tasks)))
+
+(defun org-asana-fetch-project-tasks (project-gid)
+  "Fetch incomplete tasks from PROJECT-GID."
+  (let* ((endpoint (format "/projects/%s/tasks?completed_since=now&limit=100&opt_fields=gid,name,notes,completed,due_on,due_at,modified_at,priority,tags.name,assignee.gid,projects.gid" 
+                          project-gid))
+         (response (org-asana--make-request "GET" endpoint))
+         (all-tasks (alist-get 'data response)))
+    ;; Filter for incomplete tasks only
+    (seq-filter (lambda (task) 
+                  (not (alist-get 'completed task)))
+                all-tasks)))
+
+(defun org-asana-fetch-all-my-tasks ()
+  "Fetch all incomplete tasks assigned to me from all accessible workspaces and projects."
+  (let* ((user-info (org-asana-fetch-user-info))
+         (user-gid (alist-get 'gid user-info))
+         (workspace-gid (org-asana--get-workspace-gid))
+         ;; Search for tasks assigned to me
+         (search-endpoint (format "/workspaces/%s/tasks/search?assignee.any=%s&completed=false&limit=100&opt_fields=gid,name,notes,completed,due_on,due_at,modified_at,priority,tags.name,assignee.gid,projects.gid"
+                                 workspace-gid user-gid))
+         (search-response (org-asana--make-request "GET" search-endpoint))
+         (tasks (alist-get 'data search-response)))
+    tasks))
+
+(defcustom org-asana-sync-only-with-due-dates nil
+  "If non-nil, only sync tasks that have due dates."
+  :type 'boolean
+  :group 'org-asana)
+
+(defun org-asana-fetch-tasks-with-due-dates ()
+  "Fetch all incomplete tasks with due dates assigned to the current user."
+  (let* ((all-tasks (org-asana-fetch-all-my-tasks))
+         (tasks-with-dates (seq-filter (lambda (task)
+                                        (or (alist-get 'due_on task)
+                                            (alist-get 'due_at task)))
+                                      all-tasks)))
+    tasks-with-dates))
+
+(defun org-asana-fetch-task (task-gid)
+  "Fetch detailed task information for TASK-GID."
+  (let* ((endpoint (format "/tasks/%s?opt_fields=gid,name,notes,completed,due_on,modified_at,priority,tags.name,assignee.gid,projects.gid" 
+                          task-gid))
+         (response (org-asana--make-request "GET" endpoint)))
+    (alist-get 'data response)))
+
+(defun org-asana-create-task (task-data)
+  "Create a new task in Asana with TASK-DATA."
+  (let* ((workspace-gid (org-asana--get-workspace-gid))
+         (data `((data . ,(append task-data 
+                                 `((workspace . ,workspace-gid))))))
+         (response (org-asana--make-request "POST" "/tasks" data)))
+    (alist-get 'data response)))
+
+(defun org-asana-update-task (task-gid task-data)
+  "Update task TASK-GID with TASK-DATA."
+  (let* ((endpoint (format "/tasks/%s" task-gid))
+         (data `((data . ,task-data)))
+         (response (org-asana--make-request "PUT" endpoint data)))
+    (alist-get 'data response)))
+
+(defun org-asana-delete-task (task-gid)
+  "Delete task with TASK-GID."
+  (let ((endpoint (format "/tasks/%s" task-gid)))
+    (org-asana--make-request "DELETE" endpoint)))
+
+(defun org-asana-add-task-to-project (task-gid project-gid)
+  "Add TASK-GID to PROJECT-GID."
+  (let* ((endpoint (format "/tasks/%s/addProject" task-gid))
+         (data `((data . ((project . ,project-gid))))))
+    (org-asana--make-request "POST" endpoint data)))
+
+(defun org-asana-remove-task-from-project (task-gid project-gid)
+  "Remove TASK-GID from PROJECT-GID."
+  (let* ((endpoint (format "/tasks/%s/removeProject" task-gid))
+         (data `((data . ((project . ,project-gid))))))
+    (org-asana--make-request "POST" endpoint data)))
+
+;;; Conflict Resolution Functions
+
+(defun org-asana--compare-timestamps (org-time asana-time-str)
+  "Compare ORG-TIME with ASANA-TIME-STR, return t if org is newer."
+  (when (and org-time asana-time-str)
+    (let ((asana-time (org-asana--parse-asana-timestamp asana-time-str)))
+      (time-less-p asana-time org-time))))
+
+(defun org-asana--get-entry-modified-time ()
+  "Get modification time for current org entry."
+  (let ((timestamp (org-entry-get nil "ASANA_MODIFIED")))
+    (when timestamp
+      (org-asana--parse-asana-timestamp timestamp))))
+
+(defun org-asana--resolve-conflict (org-entry-data asana-task)
+  "Resolve conflict between ORG-ENTRY-DATA and ASANA-TASK.
+Returns :org or :asana depending on resolution strategy."
+  (cond
+   ((eq org-asana-conflict-resolution 'asana-wins) :asana)
+   ((eq org-asana-conflict-resolution 'newest-wins)
+    (let* ((properties (plist-get org-entry-data :properties))
+           (org-modified (plist-get properties :ASANA_MODIFIED))
+           (asana-modified (alist-get 'modified_at asana-task)))
+      (if (and org-modified asana-modified)
+          (if (org-asana--compare-timestamps 
+               (org-asana--parse-asana-timestamp org-modified)
+               asana-modified)
+              :org
+            :asana)
+        :asana)))
+   (t :asana)))
+
+(defun org-asana--needs-sync-p (org-entry-data asana-task)
+  "Check if ORG-ENTRY-DATA and ASANA-TASK need synchronization."
+  (let* ((org-name (plist-get org-entry-data :heading))
+         (asana-name (alist-get 'name asana-task))
+         (org-completed (org-asana--get-asana-completed 
+                        (plist-get org-entry-data :todo-state)))
+         (asana-completed (alist-get 'completed asana-task))
+         (properties (plist-get org-entry-data :properties))
+         (org-modified (plist-get properties :ASANA_MODIFIED))
+         (asana-modified (alist-get 'modified_at asana-task)))
+    
+    (or (not (string= org-name asana-name))
+        (not (eq org-completed asana-completed))
+        (and org-modified asana-modified
+             (not (string= org-modified asana-modified))))))
+
+(defun org-asana--merge-task-data (org-entry-data asana-task)
+  "Merge ORG-ENTRY-DATA and ASANA-TASK based on conflict resolution."
+  (let ((winner (org-asana--resolve-conflict org-entry-data asana-task)))
+    (if (eq winner :asana)
+        asana-task
+      (org-asana-org-entry-to-task org-entry-data))))
+
+;;; Synchronization Logic
+
+(defun org-asana--find-org-entry-by-task-id (task-id)
+  "Find org entry with TASK-ID in current buffer."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward 
+           (format "^[ \t]*:ASANA_TASK_ID:[ \t]+%s" task-id) nil t)
+      (org-back-to-heading t)
+      (point))))
+
+(defun org-asana--get-all-org-asana-entries ()
+  "Get all org entries with Asana task IDs in current buffer."
+  (let ((entries '()))
+    (save-excursion
+      (goto-char (point-min))
+      (while (re-search-forward "^[ \t]*:ASANA_TASK_ID:[ \t]+\\(.+\\)" nil t)
+        (let ((task-id (match-string 1)))
+          (org-back-to-heading t)
+          (let ((entry-data (org-asana--extract-org-entry-data)))
+            (push (cons task-id entry-data) entries))))
+      entries)))
+
+(defun org-asana--sync-task-to-org (task)
+  "Sync single TASK from Asana to org."
+  (let* ((task-id (alist-get 'gid task))
+         (existing-pos (org-asana--find-org-entry-by-task-id task-id)))
+    
+    (if existing-pos
+        ;; Task exists locally - update it (including completed status)
+        (progn
+          (goto-char existing-pos)
+          (let ((org-entry-data (org-asana--extract-org-entry-data)))
+            (when (org-asana--needs-sync-p org-entry-data task)
+              (let ((winner (org-asana--resolve-conflict org-entry-data task)))
+                (when (eq winner :asana)
+                  (org-cut-subtree)
+                  (insert (org-asana-task-to-org-entry task)))))))
+      
+      ;; New task - only add if incomplete (we don't want to import completed tasks)
+      (unless (alist-get 'completed task)
+        (goto-char (point-max))
+        (unless (bolp) (insert "\n"))
+        (insert (org-asana-task-to-org-entry task))))))
+
+(defun org-asana--sync-org-to-asana (entry-data task-id)
+  "Sync org ENTRY-DATA to Asana for TASK-ID."
+  (let ((task-data (org-asana-org-entry-to-task entry-data)))
+    (if task-id
+        (org-asana-update-task task-id task-data)
+      (let ((new-task (org-asana-create-task task-data)))
+        (save-excursion
+          (org-back-to-heading t)
+          (org-set-property "ASANA_TASK_ID" (alist-get 'gid new-task))
+          (org-set-property "ASANA_MODIFIED" (alist-get 'modified_at new-task)))))))
+
+(defun org-asana-sync-from-asana ()
+  "Sync tasks from Asana to org."
+  (interactive)
+  (unless org-asana-token
+    (error "Asana token not configured. Run `org-asana-setup'"))
+  
+  (let ((buffer (if org-asana-org-file
+                   (find-file-noselect org-asana-org-file)
+                 (current-buffer))))
+    
+    (with-current-buffer buffer
+      ;; First, get all local entries with Asana IDs to check for updates
+      (let* ((local-entries (org-asana--get-all-org-asana-entries))
+             (local-task-ids (mapcar #'car local-entries))
+             (updated-count 0)
+             (new-count 0))
+        
+        ;; Fetch and update existing tasks (including completed ones)
+        (dolist (task-id local-task-ids)
+          (condition-case err
+              (let ((task (org-asana-fetch-task task-id)))
+                (when task
+                  (save-excursion
+                    (org-asana--sync-task-to-org task)
+                    (setq updated-count (1+ updated-count)))))
+            (error (message "Failed to fetch task %s: %s" task-id (error-message-string err)))))
+        
+        ;; Fetch new incomplete tasks
+        (let ((new-tasks (condition-case err
+                            (if org-asana-sync-only-with-due-dates
+                                (org-asana-fetch-tasks-with-due-dates)
+                              (org-asana-fetch-all-my-tasks))
+                          (error 
+                           (message "Search API failed, falling back to My Tasks list: %s" 
+                                   (error-message-string err))
+                           (org-asana-fetch-my-tasks)))))
+          
+          (message "Fetched %d incomplete tasks from Asana" (length new-tasks))
+          
+          ;; Add only truly new tasks
+          (save-excursion
+            (dolist (task new-tasks)
+              (unless (member (alist-get 'gid task) local-task-ids)
+                (org-asana--sync-task-to-org task)
+                (setq new-count (1+ new-count))))))
+        
+        (save-buffer)
+        (message "Sync complete: %d existing tasks updated, %d new tasks added" 
+                updated-count new-count)))))
+
+(defun org-asana-sync-to-asana ()
+  "Sync org entries to Asana."
+  (interactive)
+  (unless org-asana-token
+    (error "Asana token not configured. Run `org-asana-setup'"))
+  
+  (let ((entries (org-asana--get-all-org-asana-entries))
+        (synced-count 0))
+    
+    (dolist (entry entries)
+      (let* ((task-id (car entry))
+             (entry-data (cdr entry))
+             (properties (plist-get entry-data :properties))
+             (existing-task-id (plist-get properties :ASANA_TASK_ID)))
+        
+        (condition-case err
+            (progn
+              (org-asana--sync-org-to-asana entry-data existing-task-id)
+              (setq synced-count (1+ synced-count)))
+          (error (message "Failed to sync task %s: %s" task-id (error-message-string err))))))
+    
+    (save-buffer)
+    (message "Synced %d org entries to Asana" synced-count)))
+
+(defun org-asana-sync-bidirectional ()
+  "Perform bidirectional synchronization between org and Asana."
+  (interactive)
+  (unless org-asana-token
+    (error "Asana token not configured. Run `org-asana-setup'"))
+  
+  (message "Starting bidirectional sync...")
+  (org-asana-sync-from-asana)
+  (org-asana-sync-to-asana)
+  (message "Bidirectional sync complete"))
+
+;;;###autoload
+(defun org-asana-sync ()
+  "Main synchronization command."
+  (interactive)
+  (org-asana-sync-bidirectional))
+
+(defun org-asana-start-periodic-sync ()
   "Start periodic synchronization timer."
-  (org-asana--stop-periodic-sync)
-  (setq org-asana--sync-timer
-        (run-with-timer (* org-asana-sync-interval 60)
-                       (* org-asana-sync-interval 60)
-                       #'org-asana--periodic-sync-function)))
+  (interactive)
+  (when org-asana--sync-timer
+    (cancel-timer org-asana--sync-timer))
+  
+  (when (eq org-asana-sync-method 'periodic)
+    (setq org-asana--sync-timer
+          (run-at-time t (* org-asana-sync-interval 60)
+                       #'org-asana-sync-bidirectional))
+    (message "Started periodic sync every %d minutes" org-asana-sync-interval)))
 
-(defun org-asana--stop-periodic-sync ()
+(defun org-asana-stop-periodic-sync ()
   "Stop periodic synchronization timer."
+  (interactive)
   (when org-asana--sync-timer
     (cancel-timer org-asana--sync-timer)
-    (setq org-asana--sync-timer nil)))
+    (setq org-asana--sync-timer nil)
+    (message "Stopped periodic sync")))
 
-(defun org-asana--periodic-sync-function ()
-  "Function called by periodic sync timer."
-  (when (and org-asana-token
-             (eq org-asana-sync-method 'periodic))
-    (condition-case err
-        (let ((org-file (or org-asana-org-file (buffer-file-name))))
-          (when (and org-file (file-exists-p org-file))
-            (with-current-buffer (find-file-noselect org-file)
-              (org-asana-sync))))
-      (error (message "Periodic sync failed: %s" (error-message-string err))))))
+;;; Org-Agenda Integration
 
-;;; Minor Mode and Keybindings
+(defun org-asana--agenda-add-asana-info ()
+  "Add Asana task information to agenda lines."
+  (when (and (boundp 'org-agenda-mode) org-agenda-mode)
+    (save-excursion
+      (goto-char (point-min))
+      (while (not (eobp))
+        (when (get-text-property (point) 'org-hd-marker)
+          (let* ((marker (get-text-property (point) 'org-hd-marker))
+                 (task-id (with-current-buffer (marker-buffer marker)
+                           (save-excursion
+                             (goto-char marker)
+                             (org-entry-get nil "ASANA_TASK_ID")))))
+            (when task-id
+              (let ((line-end (line-end-position)))
+                (goto-char line-end)
+                (insert (propertize " [Asana]" 'face 'org-agenda-filter-tags))))))
+        (forward-line 1)))))
+
+(defun org-asana-agenda-sync ()
+  "Sync Asana tasks from agenda view."
+  (interactive)
+  (if (derived-mode-p 'org-agenda-mode)
+      (progn
+        (org-asana-sync)
+        (org-agenda-redo-all))
+    (error "Not in org-agenda-mode")))
+
+(defun org-asana-agenda-create-task ()
+  "Create Asana task from current agenda item."
+  (interactive)
+  (if (derived-mode-p 'org-agenda-mode)
+      (let ((marker (org-get-at-bol 'org-hd-marker)))
+        (if marker
+            (with-current-buffer (marker-buffer marker)
+              (save-excursion
+                (goto-char marker)
+                (org-asana-create-task-from-heading)))
+          (error "No task at point")))
+    (error "Not in org-agenda-mode")))
+
+(defun org-asana-agenda-open-in-asana ()
+  "Open current agenda item in Asana web interface."
+  (interactive)
+  (if (derived-mode-p 'org-agenda-mode)
+      (let ((marker (org-get-at-bol 'org-hd-marker)))
+        (if marker
+            (with-current-buffer (marker-buffer marker)
+              (save-excursion
+                (goto-char marker)
+                (let ((task-id (org-entry-get nil "ASANA_TASK_ID")))
+                  (if task-id
+                      (browse-url (format "https://app.asana.com/0/0/%s" task-id))
+                    (error "No Asana task ID found")))))
+          (error "No task at point")))
+    (error "Not in org-agenda-mode")))
+
+(define-minor-mode org-asana-agenda-mode
+  "Minor mode for Asana integration in org-agenda."
+  :lighter " Asana"
+  :keymap (let ((map (make-sparse-keymap)))
+            (define-key map (kbd "C-c a s") #'org-asana-agenda-sync)
+            (define-key map (kbd "C-c a c") #'org-asana-agenda-create-task)
+            (define-key map (kbd "C-c a o") #'org-asana-agenda-open-in-asana)
+            map)
+  (if org-asana-agenda-mode
+      (add-hook 'org-agenda-finalize-hook #'org-asana--agenda-add-asana-info nil t)
+    (remove-hook 'org-agenda-finalize-hook #'org-asana--agenda-add-asana-info t)))
+
+;;; Interactive Commands
+
+;;;###autoload
+(defun org-asana-create-task-from-heading ()
+  "Create Asana task from current org heading."
+  (interactive)
+  (unless (org-at-heading-p)
+    (error "Not at an org heading"))
+  
+  (let* ((entry-data (org-asana--extract-org-entry-data))
+         (existing-task-id (plist-get (plist-get entry-data :properties) :ASANA_TASK_ID)))
+    
+    (if existing-task-id
+        (error "This heading already has an Asana task (ID: %s)" existing-task-id)
+      (let* ((task-data (org-asana-org-entry-to-task entry-data))
+             (new-task (org-asana-create-task task-data)))
+        (org-set-property "ASANA_TASK_ID" (alist-get 'gid new-task))
+        (org-set-property "ASANA_MODIFIED" (alist-get 'modified_at new-task))
+        (message "Created Asana task: %s" (alist-get 'name new-task))))))
+
+;;;###autoload
+(defun org-asana-import-my-tasks ()
+  "Import all tasks from Asana 'My Tasks'."
+  (interactive)
+  (unless org-asana-token
+    (error "Asana token not configured. Run `org-asana-setup'"))
+  
+  (let ((tasks (org-asana-fetch-my-tasks))
+        (buffer (if org-asana-org-file
+                   (find-file org-asana-org-file)
+                 (current-buffer))))
+    
+    (with-current-buffer buffer
+      (goto-char (point-max))
+      (unless (bolp) (insert "\n"))
+      (insert (format "\n* Asana Tasks (imported %s)\n" 
+                     (format-time-string "%Y-%m-%d %H:%M")))
+      
+      (dolist (task tasks)
+        (insert (org-asana-task-to-org-entry task)))
+      
+      (save-buffer)
+      (message "Imported %d tasks from Asana" (length tasks)))))
+
+;;;###autoload
+(defun org-asana-delete-task ()
+  "Delete Asana task for current org heading."
+  (interactive)
+  (unless (org-at-heading-p)
+    (error "Not at an org heading"))
+  
+  (let ((task-id (org-entry-get nil "ASANA_TASK_ID")))
+    (unless task-id
+      (error "No Asana task ID found for this heading"))
+    
+    (when (yes-or-no-p (format "Delete Asana task %s? " task-id))
+      (org-asana-delete-task task-id)
+      (org-delete-property "ASANA_TASK_ID")
+      (org-delete-property "ASANA_MODIFIED")
+      (org-delete-property "ASANA_ASSIGNEE")
+      (org-delete-property "ASANA_PROJECTS")
+      (message "Deleted Asana task %s" task-id))))
+
+;;;###autoload
+(defun org-asana-open-in-asana ()
+  "Open current org heading's Asana task in web browser."
+  (interactive)
+  (unless (org-at-heading-p)
+    (error "Not at an org heading"))
+  
+  (let ((task-id (org-entry-get nil "ASANA_TASK_ID")))
+    (unless task-id
+      (error "No Asana task ID found for this heading"))
+    
+    (browse-url (format "https://app.asana.com/0/0/%s" task-id))))
+
+;;;###autoload
+(defun org-asana-update-from-heading ()
+  "Update Asana task from current org heading."
+  (interactive)
+  (unless (org-at-heading-p)
+    (error "Not at an org heading"))
+  
+  (let ((task-id (org-entry-get nil "ASANA_TASK_ID")))
+    (unless task-id
+      (error "No Asana task ID found for this heading"))
+    
+    (let* ((entry-data (org-asana--extract-org-entry-data))
+           (task-data (org-asana-org-entry-to-task entry-data))
+           (updated-task (org-asana-update-task task-id task-data)))
+      (org-set-property "ASANA_MODIFIED" (alist-get 'modified_at updated-task))
+      (message "Updated Asana task: %s" (alist-get 'name updated-task)))))
+
+;;; Minor Mode
 
 (defvar org-asana-mode-map
   (let ((map (make-sparse-keymap)))
     (define-key map (kbd "C-c a s") #'org-asana-sync)
     (define-key map (kbd "C-c a c") #'org-asana-create-task-from-heading)
     (define-key map (kbd "C-c a i") #'org-asana-import-my-tasks)
+    (define-key map (kbd "C-c a d") #'org-asana-delete-task)
     (define-key map (kbd "C-c a o") #'org-asana-open-in-asana)
     (define-key map (kbd "C-c a u") #'org-asana-update-from-heading)
-    (define-key map (kbd "C-c a d") #'org-asana-delete-task)
     (define-key map (kbd "C-c a t") #'org-asana-test-connection)
     map)
   "Keymap for org-asana-mode.")
 
+;;;###autoload
 (define-minor-mode org-asana-mode
-  "Minor mode for org-asana integration."
+  "Minor mode for Asana integration in org-mode."
   :lighter " Asana"
   :keymap org-asana-mode-map
-  (when (and org-asana-mode
-             (eq org-asana-sync-method 'periodic))
-    (org-asana--start-periodic-sync)))
+  (if org-asana-mode
+      (progn
+        (when (and org-asana-token (eq org-asana-sync-method 'periodic))
+          (org-asana-start-periodic-sync))
+        (message "org-asana-mode enabled"))
+    (org-asana-stop-periodic-sync)
+    (message "org-asana-mode disabled")))
 
-;;; Org-Agenda Integration
-
-(defvar org-asana-agenda-mode-map
-  (let ((map (make-sparse-keymap)))
-    (define-key map (kbd "C-c a s") #'org-asana-sync)
-    (define-key map (kbd "C-c a c") #'org-asana-create-task-from-heading)
-    (define-key map (kbd "C-c a o") #'org-asana-open-in-asana)
-    map)
-  "Keymap for org-asana-agenda-mode.")
-
-(define-minor-mode org-asana-agenda-mode
-  "Minor mode for org-asana integration in agenda views."
-  :lighter " Asana"
-  :keymap org-asana-agenda-mode-map)
-
-(defun org-asana--agenda-format-function (item)
-  "Format agenda ITEM with Asana indicator if synced."
-  (save-excursion
-    (org-agenda-goto)
-    (when (org-asana--task-id)
-      (setq item (concat item " [Asana]"))))
-  item)
-
-;;; Hooks and Initialization
-
-(defun org-asana--enable-agenda-integration ()
-  "Enable agenda integration features."
-  (add-to-list 'org-agenda-format-date-fns 'org-asana--agenda-format-function))
-
-(defun org-asana--disable-agenda-integration ()
-  "Disable agenda integration features."
-  (setq org-agenda-format-date-fns 
-        (remove 'org-asana--agenda-format-function org-agenda-format-date-fns)))
-
-(add-hook 'org-asana-agenda-mode-hook #'org-asana--enable-agenda-integration)
-(add-hook 'org-asana-agenda-mode-hook 
-          (lambda ()
-            (unless org-asana-agenda-mode
-              (org-asana--disable-agenda-integration))))
-
-;;; Package Initialization
-
-(defun org-asana-initialize ()
-  "Initialize org-asana package."
-  (when (and org-asana-token
-             (eq org-asana-sync-method 'periodic))
-    (org-asana--start-periodic-sync)))
-
-;; Initialize when package is loaded
-(add-hook 'after-init-hook #'org-asana-initialize)
-
-;; Clean up on package unload
-(add-hook 'kill-emacs-hook #'org-asana--stop-periodic-sync)
+;;;###autoload
+(defun org-asana-debug-fetch ()
+  "Debug function to test task fetching from Asana."
+  (interactive)
+  (unless org-asana-token
+    (error "Asana token not configured. Run `org-asana-setup'"))
+  
+  (condition-case err
+      (let* ((user-info (org-asana-fetch-user-info))
+             (user-gid (alist-get 'gid user-info))
+             (workspaces (org-asana-fetch-workspaces))
+             (workspace-gid (org-asana--get-workspace-gid)))
+        
+        (message "=== ASANA DEBUG INFO ===")
+        (message "User: %s (GID: %s)" (alist-get 'name user-info) user-gid)
+        (message "Workspaces found: %d" (length workspaces))
+        (dolist (ws workspaces)
+          (message "  - %s (GID: %s)" (alist-get 'name ws) (alist-get 'gid ws)))
+        (message "Using workspace GID: %s" workspace-gid)
+        
+        ;; Try to fetch task list
+        (let* ((endpoint (format "/users/%s/user_task_list?workspace=%s" 
+                                user-gid workspace-gid))
+               (task-list-response (org-asana--make-request "GET" endpoint))
+               (task-list-data (alist-get 'data task-list-response))
+               (task-list-gid (alist-get 'gid task-list-data)))
+          
+          (message "Task list GID: %s" task-list-gid)
+          (message "Task list name: %s" (alist-get 'name task-list-data))
+          
+          ;; Try to fetch tasks
+          (let* ((tasks-endpoint (format "/user_task_lists/%s/tasks?limit=10" 
+                                        task-list-gid))
+                 (tasks-response (org-asana--make-request "GET" tasks-endpoint))
+                 (tasks (alist-get 'data tasks-response)))
+            
+            (message "Tasks found: %d" (length tasks))
+            (when (> (length tasks) 0)
+              (message "First few tasks:")
+              (let ((count 0))
+                (dolist (task tasks)
+                  (when (< count 5)
+                    (message "  - %s (completed: %s)" 
+                            (alist-get 'name task)
+                            (if (alist-get 'completed task) "yes" "no"))
+                    (setq count (1+ count))))))))
+        
+        (message "=== END DEBUG INFO ==="))
+    
+    (error
+     (message "Error during debug: %s" (error-message-string err)))))
 
 (provide 'org-asana)
-
 ;;; org-asana.el ends here
