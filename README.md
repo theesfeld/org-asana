@@ -1,7 +1,7 @@
 # org-asana.el
 
 [![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-[![MELPA](https://melpa.org/packages/org-asana-badge.svg)](https://melpa.org/#/org-asana)
+[![MELPA](https://melpa.org/packages/org-asana-badge.svg)](https://melpa.org/#/org-asana) [not added]
 
 Two-way synchronization between Emacs Org-mode and Asana tasks.
 
@@ -18,7 +18,7 @@ Two-way synchronization between Emacs Org-mode and Asana tasks.
 
 ## Installation
 
-### Via MELPA (Recommended)
+### Via MELPA (Recommended) [not yet added]
 
 ```elisp
 (use-package org-asana
