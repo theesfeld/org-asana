@@ -1,4 +1,4 @@
-;;; org-asana.el --- Two-way sync between Org-mode and Asana -*- lexical-binding: t; -*-
+;;; org-asana.el --- Two-way sync between Org-mode and Asana  -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2024 William Theesfeld <william@theesfeld.net>
 
