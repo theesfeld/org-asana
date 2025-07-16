@@ -379,6 +379,20 @@ When nil, tasks will be added to the current buffer."
   (when (and tags-string (not (string-empty-p tags-string)))
     (split-string (substring tags-string 1 -1) ":")))
 
+(defun org-asana--format-project-context (projects)
+  "Format project names for display in org heading."
+  (when projects
+    (let ((project-names (mapcar (lambda (project)
+                                  (or (alist-get 'name project)
+                                      (format "Project-%s" (alist-get 'gid project))))
+                                projects)))
+      (cond
+       ((= (length project-names) 1)
+        (format "[%s]" (car project-names)))
+       ((> (length project-names) 1)
+        (format "[%s]" (mapconcat 'identity project-names ", ")))
+       (t "")))))
+
 (defun org-asana-task-to-org-entry (task)
   "Convert Asana TASK to org entry string."
   (let* ((name (alist-get 'name task))
@@ -397,11 +411,16 @@ When nil, tasks will be added to the current buffer."
                     (org-asana--format-org-tags tags)))
          (deadline-str (when due-on
                         (org-asana--format-org-timestamp
-                         (org-asana--parse-asana-timestamp due-on)))))
+                         (org-asana--parse-asana-timestamp due-on))))
+         (project-context (when org-asana-include-project-context
+                           (org-asana--format-project-context projects))))
 
     (concat
      (org-asana--format-org-heading org-asana-heading-level
-                                   (concat todo-state " " priority-str name))
+                                   (concat todo-state " " priority-str
+                                          (when (not (string-empty-p project-context))
+                                            (concat project-context " "))
+                                          name))
      (when tags-str (concat " " tags-str))
      "\n"
      (when deadline-str
@@ -415,6 +434,9 @@ When nil, tasks will be added to the current buffer."
      (when projects
        (concat ":ASANA_PROJECTS: "
                (mapconcat (lambda (p) (alist-get 'gid p)) projects ",") "\n"))
+     (when projects
+       (concat ":ASANA_PROJECT_NAMES: "
+               (mapconcat (lambda (p) (or (alist-get 'name p) "")) projects ",") "\n"))
      ":END:\n"
      (when (and notes (not (string-empty-p notes)))
        (concat notes "\n")))))
@@ -468,25 +490,42 @@ When nil, tasks will be added to the current buffer."
 
 ;;; HTTP/API Interface Functions
 
-(defun org-asana--make-request (method endpoint &optional data)
+(defun org-asana--make-request (method endpoint &optional data callback)
   "Make HTTP request to Asana API.
-METHOD is the HTTP method, ENDPOINT is the API path, DATA is optional JSON data."
+METHOD is the HTTP method, ENDPOINT is the API path, DATA is optional JSON data.
+CALLBACK is optional async callback function. If nil, uses synchronous request."
   (let* ((url (org-asana--api-url endpoint))
          (url-request-method method)
          (url-request-extra-headers (org-asana--http-headers))
-         (url-request-data (when data (json-encode data)))
-         (buffer (url-retrieve-synchronously url)))
-
-    (unwind-protect
-        (with-current-buffer buffer
-          (goto-char (point-min))
-          (if (re-search-forward "^HTTP/[0-9.]+ \\([0-9]+\\)" nil t)
-              (let ((status (string-to-number (match-string 1))))
-                (if (and (>= status 200) (< status 300))
-                    (org-asana--parse-json-response buffer)
-                  (org-asana--handle-http-error status)))
-            (error "Invalid HTTP response from Asana")))
-      (kill-buffer buffer))))
+         (url-request-data (when data (json-encode data))))
+    
+    (if callback
+        ;; Async request
+        (url-retrieve url
+                     (lambda (status)
+                       (let ((response-buffer (current-buffer)))
+                         (unwind-protect
+                             (progn
+                               (goto-char (point-min))
+                               (if (re-search-forward "^HTTP/[0-9.]+ \\([0-9]+\\)" nil t)
+                                   (let ((http-status (string-to-number (match-string 1))))
+                                     (if (and (>= http-status 200) (< http-status 300))
+                                         (funcall callback (org-asana--parse-json-response response-buffer))
+                                       (funcall callback nil (org-asana--handle-http-error http-status))))
+                                 (funcall callback nil "Invalid HTTP response from Asana")))
+                           (kill-buffer response-buffer)))))
+      ;; Synchronous request (for backward compatibility)
+      (let ((buffer (url-retrieve-synchronously url)))
+        (unwind-protect
+            (with-current-buffer buffer
+              (goto-char (point-min))
+              (if (re-search-forward "^HTTP/[0-9.]+ \\([0-9]+\\)" nil t)
+                  (let ((status (string-to-number (match-string 1))))
+                    (if (and (>= status 200) (< status 300))
+                        (org-asana--parse-json-response buffer)
+                      (org-asana--handle-http-error status)))
+                (error "Invalid HTTP response from Asana")))
+          (kill-buffer buffer)))))
 
 (defun org-asana-fetch-user-info ()
   "Fetch current user information from Asana."
@@ -516,7 +555,7 @@ METHOD is the HTTP method, ENDPOINT is the API path, DATA is optional JSON data.
          (task-list-response (org-asana--make-request "GET" endpoint))
          (task-list-gid (alist-get 'gid (alist-get 'data task-list-response)))
          ;; Fetch only incomplete tasks with limit of 100
-         (tasks-endpoint (format "/user_task_lists/%s/tasks?completed_since=now&limit=100&opt_fields=gid,name,notes,completed,due_on,due_at,modified_at,priority,tags.name,assignee.gid,projects.gid"
+         (tasks-endpoint (format "/user_task_lists/%s/tasks?completed_since=now&limit=100&opt_fields=gid,name,notes,completed,due_on,due_at,modified_at,priority,tags.name,assignee.gid,projects.gid,projects.name"
                                 task-list-gid))
          (tasks-response (org-asana--make-request "GET" tasks-endpoint))
          (all-tasks (alist-get 'data tasks-response)))
@@ -527,7 +566,7 @@ METHOD is the HTTP method, ENDPOINT is the API path, DATA is optional JSON data.
 
 (defun org-asana-fetch-project-tasks (project-gid)
   "Fetch incomplete tasks from PROJECT-GID."
-  (let* ((endpoint (format "/projects/%s/tasks?completed_since=now&limit=100&opt_fields=gid,name,notes,completed,due_on,due_at,modified_at,priority,tags.name,assignee.gid,projects.gid"
+  (let* ((endpoint (format "/projects/%s/tasks?completed_since=now&limit=100&opt_fields=gid,name,notes,completed,due_on,due_at,modified_at,priority,tags.name,assignee.gid,projects.gid,projects.name"
                           project-gid))
          (response (org-asana--make-request "GET" endpoint))
          (all-tasks (alist-get 'data response)))
@@ -542,7 +581,7 @@ METHOD is the HTTP method, ENDPOINT is the API path, DATA is optional JSON data.
          (user-gid (alist-get 'gid user-info))
          (workspace-gid (org-asana--get-workspace-gid))
          ;; Search for tasks assigned to me
-         (search-endpoint (format "/workspaces/%s/tasks/search?assignee.any=%s&completed=false&limit=100&opt_fields=gid,name,notes,completed,due_on,due_at,modified_at,priority,tags.name,assignee.gid,projects.gid"
+         (search-endpoint (format "/workspaces/%s/tasks/search?assignee.any=%s&completed=false&limit=100&opt_fields=gid,name,notes,completed,due_on,due_at,modified_at,priority,tags.name,assignee.gid,projects.gid,projects.name"
                                  workspace-gid user-gid))
          (search-response (org-asana--make-request "GET" search-endpoint))
          (tasks (alist-get 'data search-response)))
@@ -550,6 +589,11 @@ METHOD is the HTTP method, ENDPOINT is the API path, DATA is optional JSON data.
 
 (defcustom org-asana-sync-only-with-due-dates nil
   "If non-nil, only sync tasks that have due dates."
+  :type 'boolean
+  :group 'org-asana)
+
+(defcustom org-asana-include-project-context t
+  "If non-nil, include project names in org heading for context."
   :type 'boolean
   :group 'org-asana)
 
@@ -564,7 +608,7 @@ METHOD is the HTTP method, ENDPOINT is the API path, DATA is optional JSON data.
 
 (defun org-asana-fetch-task (task-gid)
   "Fetch detailed task information for TASK-GID."
-  (let* ((endpoint (format "/tasks/%s?opt_fields=gid,name,notes,completed,due_on,modified_at,priority,tags.name,assignee.gid,projects.gid"
+  (let* ((endpoint (format "/tasks/%s?opt_fields=gid,name,notes,completed,due_on,modified_at,priority,tags.name,assignee.gid,projects.gid,projects.name"
                           task-gid))
          (response (org-asana--make-request "GET" endpoint)))
     (alist-get 'data response)))
@@ -713,50 +757,68 @@ Returns :org or :asana depending on resolution strategy."
           (org-set-property "ASANA_TASK_ID" (alist-get 'gid new-task))
           (org-set-property "ASANA_MODIFIED" (alist-get 'modified_at new-task)))))))
 
-(defun org-asana-sync-from-asana ()
-  "Sync tasks from Asana to org."
+(defun org-asana-sync-from-asana (&optional target-buffer)
+  "Sync tasks from Asana to org in TARGET-BUFFER."
   (interactive)
   (unless org-asana-token
     (error "Asana token not configured. Run `org-asana-setup'"))
 
-  (let ((buffer (if org-asana-org-file
-                   (let ((buf (find-file-noselect org-asana-org-file)))
-                     (with-current-buffer buf
-                       ;; Always enable org-mode for Asana files
-                       (org-mode))
-                     buf)
-                 (current-buffer))))
+  (let ((buffer (or target-buffer
+                   (if org-asana-org-file
+                       (let ((buf (find-file-noselect org-asana-org-file)))
+                         (with-current-buffer buf
+                           (org-mode))
+                         buf)
+                     (if (derived-mode-p 'org-mode)
+                         (current-buffer)
+                       (error "Not in org-mode buffer and no org-asana-org-file configured"))))))
 
+    (message "Starting sync from Asana...")
     (with-current-buffer buffer
-      ;; First, get all local entries with Asana IDs to check for updates
       (let* ((local-entries (org-asana--get-all-org-asana-entries))
              (local-task-ids (mapcar #'car local-entries))
              (updated-count 0)
-             (new-count 0))
+             (new-count 0)
+             (processed-count 0)
+             (total-local (length local-task-ids)))
 
-        ;; Fetch and update existing tasks (including completed ones)
-        (dolist (task-id local-task-ids)
-          (condition-case err
-              (let ((task (org-asana-fetch-task task-id)))
-                (when task
-                  (save-excursion
-                    (org-asana--sync-task-to-org task)
-                    (setq updated-count (1+ updated-count)))))
-            (error (message "Failed to fetch task %s: %s" task-id (error-message-string err)))))
+        ;; Update existing tasks (let needs-sync-p decide what to update)
+        (dolist (entry local-entries)
+          (let* ((task-id (car entry))
+                 (entry-data (cdr entry)))
+            (setq processed-count (1+ processed-count))
+            (when (= 0 (% processed-count 5))
+              (message "Processing existing task %d of %d..." processed-count total-local))
+            
+            (condition-case err
+                (let ((task (org-asana-fetch-task task-id)))
+                  (when task
+                    (save-excursion
+                      (when (org-asana--find-org-entry-by-task-id task-id)
+                        (goto-char (org-asana--find-org-entry-by-task-id task-id))
+                        (let ((current-entry (org-asana--extract-org-entry-data)))
+                          (when (org-asana--needs-sync-p current-entry task)
+                            (org-asana--sync-task-to-org task)
+                            (setq updated-count (1+ updated-count))))))))
+              (error (message "Failed to fetch task %s: %s" task-id (error-message-string err))))))
 
-        ;; Fetch new incomplete tasks
+        (message "Fetching new tasks from Asana...")
+        ;; Fetch only incomplete tasks
         (let ((new-tasks (condition-case err
-                            (if org-asana-sync-only-with-due-dates
-                                (org-asana-fetch-tasks-with-due-dates)
-                              (org-asana-fetch-all-my-tasks))
+                            (seq-filter (lambda (task)
+                                         (not (alist-get 'completed task)))
+                                       (if org-asana-sync-only-with-due-dates
+                                           (org-asana-fetch-tasks-with-due-dates)
+                                         (org-asana-fetch-all-my-tasks)))
                           (error
                            (message "Search API failed, falling back to My Tasks list: %s"
                                    (error-message-string err))
-                           (org-asana-fetch-my-tasks)))))
+                           (seq-filter (lambda (task)
+                                        (not (alist-get 'completed task)))
+                                      (org-asana-fetch-my-tasks))))))
 
-          (message "Fetched %d incomplete tasks from Asana" (length new-tasks))
+          (message "Processing %d new incomplete tasks from Asana" (length new-tasks))
 
-          ;; Add only truly new tasks
           (save-excursion
             (dolist (task new-tasks)
               (unless (member (alist-get 'gid task) local-task-ids)
@@ -803,10 +865,28 @@ Returns :org or :asana depending on resolution strategy."
   (message "Bidirectional sync complete"))
 
 ;;;###autoload
-(defun org-asana-sync ()
-  "Main synchronization command."
+(defun org-asana-sync (&optional target-buffer)
+  "Main synchronization command. Works from any buffer if TARGET-BUFFER or org-asana-org-file is set."
   (interactive)
-  (org-asana-sync-bidirectional))
+  (let ((sync-buffer (or target-buffer
+                        (when org-asana-org-file
+                          (find-file-noselect org-asana-org-file))
+                        (when (derived-mode-p 'org-mode)
+                          (current-buffer)))))
+    (if sync-buffer
+        (progn
+          (message "Starting bidirectional sync...")
+          (org-asana-sync-from-asana sync-buffer)
+          (with-current-buffer sync-buffer
+            (org-asana-sync-to-asana))
+          (message "Bidirectional sync complete"))
+      (if (y-or-n-p "No org file configured. Set org-asana-org-file now? ")
+          (progn
+            (setq org-asana-org-file
+                  (read-file-name "Org file for Asana sync: " nil nil nil nil
+                                 (lambda (name) (string-suffix-p ".org" name))))
+            (org-asana-sync))
+        (error "No org buffer or file configured for sync")))))
 
 (defun org-asana-start-periodic-sync ()
   "Start periodic synchronization timer."
