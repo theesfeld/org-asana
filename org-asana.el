@@ -657,13 +657,6 @@ Returns :org or :asana depending on resolution strategy."
         (org-asana--update-existing-task task-fields existing-pos)
       (org-asana--create-new-task task-fields parent-pos))))
 
-(defun org-asana--goto-heading-from-pos (pos)
-  "Go to heading at or before POS."
-  (goto-char pos)
-  (unless (org-at-heading-p)
-    (org-back-to-heading t)))
-
-
 (defun org-asana--find-task-by-id (task-id parent-pos)
   "Find task with TASK-ID in subtree starting at PARENT-POS.
 Uses org-map-entries for robust subtree boundary handling."
@@ -676,34 +669,6 @@ Uses org-map-entries for robust subtree boundary handling."
            (setq found-pos (point))))
        nil 'tree)
       found-pos)))
-
-;; Alternative implementation using org-element-map (more modern approach):
-;; (defun org-asana--find-task-by-id-alt (task-id parent-pos)
-;;   "Find task with TASK-ID in subtree starting at PARENT-POS using org-element."
-;;   (save-excursion
-;;     (goto-char parent-pos)
-;;     (let ((subtree (org-element-at-point)))
-;;       (org-element-map subtree 'headline
-;;         (lambda (headline)
-;;           (when (string= (org-element-property :ASANA_TASK_ID headline) task-id)
-;;             (org-element-property :begin headline)))
-;;         nil t))))
-
-;; Alternative implementation with fixed boundary calculation:
-;; (defun org-asana--find-task-by-id-fixed (task-id parent-pos)
-;;   "Find task with TASK-ID after PARENT-POS with corrected boundary handling."
-;;   (save-excursion
-;;     (goto-char parent-pos)
-;;     (when (org-at-heading-p)
-;;       (let ((subtree-end (save-excursion
-;;                            (org-end-of-subtree t)
-;;                            (point))))
-;;         (org-end-of-meta-data t)
-;;         (when (re-search-forward
-;;                (format "^[ \t]*:ASANA_TASK_ID:[ \t]+%s" task-id)
-;;                subtree-end t)
-;;           (org-back-to-heading t)
-;;           (point))))))
 
 (defun org-asana--update-heading (new-text)
   "Update current heading text to NEW-TEXT."
