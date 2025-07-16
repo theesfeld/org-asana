@@ -1,306 +1,105 @@
-# org-asana.el
+# org-asana
 
-[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](https://www.gnu.org/licenses/gpl-3.0)
-
-Two-way synchronization between Emacs Org-mode and Asana tasks.
+Simple bidirectional sync between Emacs Org-mode and Asana.
 
 ## Features
 
-- **Bidirectional sync** between Org-mode entries and Asana tasks
-- **Manual or periodic synchronization** (user configurable)
-- **Intelligent conflict resolution** using newest-wins strategy with fallback
-- **Comprehensive data mapping** (deadlines, priorities, tags, assignees, projects)
-- **Org-agenda integration** with visual indicators and keybindings
-- **Personal Access Token authentication**
-- **Rate limiting and error handling**
-- **Pure functional design** following GNU coding standards
+- **Bidirectional sync**: Push org changes to Asana, pull Asana tasks to org
+- **Hierarchical structure**: Projects → Sections → Tasks with TODO statistics
+- **DONE task handling**: Completed tasks move to a COMPLETED section
+- **Works from anywhere**: Syncs to a designated file from any buffer
+- **Minimal configuration**: Just set your token and file path
 
 ## Installation
 
-### Via use-package with :vc (Recommended)
+### Manual Installation
+
+1. Clone this repository
+2. Add to your init file:
+
+```elisp
+(add-to-list 'load-path "/path/to/org-asana")
+(require 'org-asana)
+```
+
+### Using use-package
 
 ```elisp
 (use-package org-asana
-  :vc (:url "https://github.com/wtheesfeld/org-asana"
-       :rev :newest)
-  :after org
+  :load-path "/path/to/org-asana"
   :config
-  (setq org-asana-token "your-personal-access-token")
-  (org-asana-setup))
+  (setq org-asana-token "YOUR_PERSONAL_ACCESS_TOKEN"
+        org-asana-org-file "~/org/asana.org"))
 ```
-
-### Manual Installation
-
-1. Clone the repository:
-   ```bash
-   git clone https://github.com/wtheesfeld/org-asana.git
-   ```
-
-2. Add to your Emacs load path and configure:
-   ```elisp
-   (add-to-list 'load-path "/path/to/org-asana")
-   (require 'org-asana)
-   (setq org-asana-token "your-personal-access-token")
-   (org-asana-setup)
-   ```
-
-## Quick Start
-
-1. **Get your Asana Personal Access Token**:
-   - Go to [Asana Apps](https://app.asana.com/0/my-apps)
-   - Click "Create New Personal Access Token"
-   - Copy the token
-
-2. **Configure org-asana**:
-   ```elisp
-   (setq org-asana-token "your-token-here")
-   M-x org-asana-setup
-   ```
-
-3. **Start syncing**:
-   ```elisp
-   M-x org-asana-sync
-   ```
 
 ## Configuration
 
-### Complete use-package Example
+Get your Personal Access Token from Asana:
+1. Go to https://app.asana.com
+2. Click your profile photo → Settings → Apps
+3. Navigate to "Developer apps"
+4. Click "+ Create new token"
+5. Name it (e.g., "Emacs Org-mode Sync")
+6. Copy the token
+
+Then configure org-asana:
 
 ```elisp
-(use-package org-asana
-  :vc (:url "https://github.com/wtheesfeld/org-asana"
-       :rev :newest)
-  :after org
-  :config
-  ;; Required: Your Asana Personal Access Token
-  (setq org-asana-token "your-personal-access-token"
-        
-        ;; Sync method: 'manual or 'periodic (default: 'manual)
-        org-asana-sync-method 'periodic
-        
-        ;; Sync interval in minutes for periodic sync (default: 15)
-        org-asana-sync-interval 10
-        
-        ;; Conflict resolution: 'newest-wins or 'asana-wins (default: 'newest-wins)
-        org-asana-conflict-resolution 'newest-wins
-        
-        ;; Default workspace GID (default: nil - auto-select first)
-        org-asana-default-workspace nil
-        
-        ;; Default project GID for new tasks (default: nil - My Tasks only)
-        org-asana-default-project nil
-        
-        ;; Whether to sync org tags with Asana tags (default: t)
-        org-asana-sync-tags t
-        
-        ;; Whether to sync org priority with Asana priority (default: t)
-        org-asana-sync-priority t
-        
-        ;; Specific org file for Asana tasks (default: nil - current buffer)
-        org-asana-org-file "~/org/asana.org"
-        
-        ;; Org heading level for Asana tasks (default: 2)
-        org-asana-heading-level 2)
-  
-  ;; Optional: Enable org-asana-mode in org buffers
-  :hook (org-mode . org-asana-mode)
-  
-  ;; Optional: Enable agenda integration
-  :hook (org-agenda-mode . org-asana-agenda-mode)
-  
-  ;; Keybindings (automatically set when org-asana-mode is enabled)
-  :bind (:map org-mode-map
-         ("C-c a s" . org-asana-sync)
-         ("C-c a c" . org-asana-create-task-from-heading)
-         ("C-c a i" . org-asana-import-my-tasks)
-         ("C-c a o" . org-asana-open-in-asana)
-         ("C-c a u" . org-asana-update-from-heading)
-         ("C-c a d" . org-asana-delete-task)
-         ("C-c a t" . org-asana-test-connection)))
+(setq org-asana-token "YOUR_TOKEN_HERE"
+      org-asana-org-file "~/org/asana.org")
 ```
-
-### Configuration Options
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `org-asana-token` | `nil` | **Required**: Your Asana Personal Access Token |
-| `org-asana-sync-method` | `'manual` | Sync method: `'manual` or `'periodic` |
-| `org-asana-sync-interval` | `15` | Minutes between periodic syncs |
-| `org-asana-conflict-resolution` | `'newest-wins` | Strategy: `'newest-wins` or `'asana-wins` |
-| `org-asana-default-workspace` | `nil` | Default workspace GID (auto-select if nil) |
-| `org-asana-default-project` | `nil` | Default project GID (My Tasks if nil) |
-| `org-asana-sync-tags` | `t` | Sync org tags with Asana tags |
-| `org-asana-sync-priority` | `t` | Sync org priority with Asana priority |
-| `org-asana-org-file` | `nil` | Specific org file for tasks (current buffer if nil) |
-| `org-asana-heading-level` | `2` | Heading level for imported tasks |
-| `org-asana-sync-only-with-due-dates` | `nil` | Only sync tasks that have due dates |
 
 ## Usage
 
-### Interactive Commands
+Only two commands:
 
-| Command | Keybinding | Description |
-|---------|------------|-------------|
-| `org-asana-sync` | `C-c a s` | Bidirectional synchronization |
-| `org-asana-create-task-from-heading` | `C-c a c` | Create Asana task from org heading |
-| `org-asana-import-my-tasks` | `C-c a i` | Import all "My Tasks" from Asana |
-| `org-asana-open-in-asana` | `C-c a o` | Open task in Asana web interface |
-| `org-asana-update-from-heading` | `C-c a u` | Update Asana task from org entry |
-| `org-asana-delete-task` | `C-c a d` | Delete Asana task |
-| `org-asana-test-connection` | `C-c a t` | Test API connection |
-| `org-asana-setup` | - | Interactive setup wizard |
+- `M-x org-asana-test-connection` - Test your API connection
+- `M-x org-asana-sync` - Sync tasks between Org and Asana
 
-### Sync Methods
+## File Structure
 
-#### Manual Sync
-```elisp
-(setq org-asana-sync-method 'manual)
-;; Sync when you want: M-x org-asana-sync
-```
-
-#### Periodic Sync
-```elisp
-(setq org-asana-sync-method 'periodic
-      org-asana-sync-interval 15) ; Every 15 minutes
-```
-
-### Data Mapping
-
-| Org Property | Asana Field | Description |
-|--------------|-------------|-------------|
-| Heading | `name` | Task title |
-| `TODO`/`DONE` | `completed` | Completion status |
-| `DEADLINE` | `due_date` | Due date |
-| `[#A]`/`[#B]`/`[#C]` | `priority` | Priority level |
-| Tags | `tags` | Task tags (if enabled) |
-| Entry body | `notes` | Task description |
-| `:ASANA_TASK_ID:` | `gid` | Unique task identifier |
-| `:ASANA_MODIFIED:` | `modified_at` | Last modification time |
-| `:ASANA_ASSIGNEE:` | `assignee.gid` | Assigned user |
-| `:ASANA_PROJECTS:` | `projects` | Associated projects |
-
-### Handling Completed Tasks
-
-org-asana handles completed tasks intelligently:
-
-- **Existing tasks**: Always synced bidirectionally, including completion status changes
-- **New completed tasks**: Not imported from Asana (keeps your org files clean)
-- **Local completed tasks**: Synced to Asana when marked as DONE
-- **Filtering options**: Use `org-asana-sync-only-with-due-dates` to sync only tasks with deadlines
-
-### Example Org Entry
+After syncing, your org file will look like:
 
 ```org
-** TODO [#A] Complete project documentation :work:urgent:
-DEADLINE: <2024-07-20 Sat>
-:PROPERTIES:
-:ASANA_TASK_ID: 1234567890123456
-:ASANA_MODIFIED: 2024-07-15T10:30:00.000Z
-:ASANA_ASSIGNEE: 9876543210987654
-:ASANA_PROJECTS: 1111222233334444,5555666677778888
-:END:
-Write comprehensive documentation for the new feature including API references and examples.
+* Active Projects
+** Project Name [2/5]
+*** Section Name [1/3]
+**** TODO Task 1
+     DEADLINE: <2024-07-20>
+     :PROPERTIES:
+     :ASANA_TASK_ID: 123456789
+     :ASANA_MODIFIED: 2024-07-15T10:00:00.000Z
+     :END:
+**** DONE Task 2
+**** TODO Task 3
+*** Another Section [1/2]
+**** TODO Task 4
+**** DONE Task 5
+
+* COMPLETED
+** Project Name
+*** Section Name  
+**** DONE Completed task
+     :PROPERTIES:
+     :ASANA_TASK_ID: 987654321
+     :ASANA_COMPLETED_AT: 2024-07-14T15:00:00.000Z
+     :END:
 ```
 
-## Org-Agenda Integration
+## How It Works
 
-Enable `org-asana-agenda-mode` for enhanced agenda functionality:
+1. **Sync from Asana**: Fetches all incomplete tasks assigned to you, organizing them by project and section
+2. **Sync to Asana**: Updates task names, notes, completion status, and due dates
+3. **DONE tasks**: When you mark a task as DONE in org, it syncs to Asana and moves to the COMPLETED section
+4. **No duplicates**: Completed tasks in the COMPLETED section are never re-synced
 
-```elisp
-(add-hook 'org-agenda-mode-hook #'org-asana-agenda-mode)
-```
+## Limitations
 
-### Agenda Features
-- Visual `[Asana]` indicators for synced tasks
-- Direct sync from agenda view (`C-c a s`)
-- Create tasks from agenda items (`C-c a c`)
-- Open tasks in Asana (`C-c a o`)
-
-## Conflict Resolution
-
-When the same task is modified in both Org-mode and Asana:
-
-### Newest Wins (Default)
-```elisp
-(setq org-asana-conflict-resolution 'newest-wins)
-```
-Compares modification timestamps and keeps the most recent changes.
-
-### Asana Wins
-```elisp
-(setq org-asana-conflict-resolution 'asana-wins)
-```
-Always prefers Asana data over Org-mode data.
-
-## Advanced Configuration
-
-### Workspace Selection
-```elisp
-M-x org-asana-configure-workspace
-```
-
-### Reset Configuration
-```elisp
-M-x org-asana-reset-configuration
-```
-
-### Save Configuration to Init File
-The setup wizard can automatically save your configuration:
-```elisp
-M-x org-asana-setup
-;; Answer "yes" to "Save configuration to init file?"
-```
-
-## Troubleshooting
-
-### Authentication Issues
-1. Verify your token at [Asana Apps](https://app.asana.com/0/my-apps)
-2. Test connection: `M-x org-asana-test-connection`
-3. Check token permissions in Asana
-
-### Sync Issues
-1. Check network connectivity
-2. Verify workspace/project access in Asana
-3. Review conflict resolution settings
-4. Check Emacs `*Messages*` buffer for errors
-
-### Rate Limiting
-org-asana respects Asana's rate limits (150 requests/minute). If you hit limits:
-- Reduce sync frequency
-- Sync smaller batches
-- Wait for rate limit reset
-
-## Requirements
-
-- **Emacs 30.1+** (for improved JSON parsing)
-- **Org 9.4+** (for modern org-agenda features)
-- **Internet connection** for Asana API access
-- **Asana Personal Access Token**
-
-## Contributing
-
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes following GNU coding standards
-4. Test your changes
-5. Submit a pull request
+- Only syncs tasks assigned to you
+- No support for creating new tasks (use Asana web/app for that)
+- Tags and priorities are not synced
+- One-way sync for completed tasks (org → Asana only)
 
 ## License
 
-This program is free software: you can redistribute it and/or modify it under the terms of the GNU General Public License as published by the Free Software Foundation, either version 3 of the License, or (at your option) any later version.
-
-## Acknowledgments
-
-- Built following GNU Emacs coding standards
-- Inspired by the Org-mode and Asana communities
-- Follows functional programming principles
-
-## Support
-
-- **Issues**: [GitHub Issues](https://github.com/theesfeld/asana-emacs/issues)
-- **Documentation**: This README and inline documentation
-- **Community**: Emacs and Org-mode communities
-
----
-
-*Made with ❤️ for the Emacs community*
+GNU GPL v3+
