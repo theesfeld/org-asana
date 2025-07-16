@@ -132,8 +132,7 @@
   (unless org-asana-token
     (error "No Asana token configured. Set `org-asana-token'"))
   (condition-case err
-      (let* ((response (org-asana--make-request "GET" "/users/me"))
-             (user (alist-get 'data response)))
+      (let* ((user (alist-get 'data (org-asana--make-request "GET" "/users/me"))))
         (message "Connected to Asana as: %s" (alist-get 'name user))
         t)
     (error
@@ -300,7 +299,7 @@
                (org-asana--make-request
                 "GET"
                 (format "/workspaces/%s/tasks/search?assignee.any=%s&completed=false&limit=100&opt_fields=%s"
-                        workspace-gid user-gid opt-fields))))
+                        workspace-gid user-gid opt-fields)))))
 
 (defun org-asana--fetch-task-comments (task-id)
   "Fetch comments for TASK-ID from Asana."
@@ -361,7 +360,7 @@
       (when formatted-attachments
         (concat "\n*** Attachments\n"
                 (string-join (nreverse formatted-attachments) "\n")
-                "\n"))))))
+                "\n")))))
 
 (defun org-asana--process-project-sections (project-entry section-start)
   "Process PROJECT-ENTRY sections under SECTION-START."
