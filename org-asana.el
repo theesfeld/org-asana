@@ -94,6 +94,12 @@
     ("Content-Type" . "application/json")
     ("Accept" . "application/json")))
 
+(defun org-asana--encode-json-data (data)
+  "Encode DATA as JSON string with error handling."
+  (condition-case nil
+      (json-encode data)
+    (error (error "Failed to encode JSON data for Asana API"))))
+
 (defun org-asana--api-url (endpoint)
   "Construct full API URL for ENDPOINT."
   (concat org-asana-api-base-url endpoint))
@@ -103,14 +109,16 @@
   (with-current-buffer buffer
     (goto-char (point-min))
     (re-search-forward "^$" nil t)
-    (json-parse-buffer :object-type 'alist :array-type 'list)))
+    (condition-case nil
+        (json-parse-buffer :object-type 'alist :array-type 'list)
+      (error (error "Invalid JSON response from Asana API")))))
 
 (defun org-asana--make-request (method endpoint &optional data)
   "Make HTTP request to Asana API."
   (let* ((url (org-asana--api-url endpoint))
          (url-request-method method)
          (url-request-extra-headers (org-asana--http-headers))
-         (url-request-data (when data (json-encode data)))
+         (url-request-data (when data (org-asana--encode-json-data data)))
          (buffer (url-retrieve-synchronously url)))
     (unwind-protect
         (with-current-buffer buffer
@@ -358,7 +366,7 @@
                          name)
                   formatted-attachments))))
       (when formatted-attachments
-        (concat "\n*** Attachments\n"
+        (concat "*** Attachments\n"
                 (string-join (nreverse formatted-attachments) "\n")
                 "\n")))))
 
@@ -456,16 +464,20 @@
          (completed (plist-get task-fields :completed))
          (priority (plist-get task-fields :priority))
          (tags (plist-get task-fields :tags))
+         (permalink-url (plist-get task-fields :permalink-url))
          (todo-state (org-asana--get-org-todo-state completed))
          (priority-str (when (and org-asana-sync-priority priority)
                         (org-asana--format-org-priority priority)))
          (tags-str (when (and org-asana-sync-tags tags)
-                    (org-asana--format-org-tags tags))))
+                    (org-asana--format-org-tags tags)))
+         (linked-name (if permalink-url
+                         (format "[[%s][%s]]" permalink-url (or task-name ""))
+                       (or task-name ""))))
 
     (format "**** %s %s%s%s\n"
             todo-state
             (or priority-str "")
-            (or task-name "")
+            linked-name
             (or tags-str ""))))
 
 (defun org-asana--create-new-task (task-fields parent-pos)
@@ -473,7 +485,7 @@
   (let ((completed (plist-get task-fields :completed)))
     ;; Only create incomplete tasks in Active Projects section
     ;; JSON false comes as :false, not nil
-    (unless (or (eq completed t) (eq completed :true) (eq completed 'true))
+    (when (org-asana--json-false-p completed)
       (save-excursion
         (goto-char parent-pos)
         (org-end-of-subtree t)
@@ -495,17 +507,18 @@
     (org-set-property "ASANA_TASK_ID" task-id)
     (org-set-property "ASANA_MODIFIED" modified-at)))
 
+(defun org-asana--insert-task-notes (notes)
+  "Insert NOTES text if not empty."
+  (when (and notes (not (string-empty-p notes)))
+    (insert notes "\n")))
+
 (defun org-asana--add-task-notes (task-fields)
   "Add notes to task from TASK-FIELDS."
   (let ((notes (plist-get task-fields :notes))
         (comments (plist-get task-fields :comments))
-        (attachments (plist-get task-fields :attachments))
-        (permalink-url (plist-get task-fields :permalink-url)))
+        (attachments (plist-get task-fields :attachments)))
     (org-end-of-meta-data t)
-    (when (and notes (not (string-empty-p notes)))
-      (insert notes "\n"))
-    (when permalink-url
-      (insert (format "[[%s][View in Asana]]\n" permalink-url)))
+    (org-asana--insert-task-notes notes)
     (when attachments
       (insert (org-asana--format-attachments attachments)))
     (when comments
@@ -564,14 +577,21 @@
                               end))))
           (delete-region section-start section-end))))))
 
+(defun org-asana--get-user-gid (user-workspace-info)
+  "Extract user GID from USER-WORKSPACE-INFO."
+  (nth 0 user-workspace-info))
+
+(defun org-asana--get-workspace-gid (user-workspace-info)
+  "Extract workspace GID from USER-WORKSPACE-INFO."
+  (nth 1 user-workspace-info))
+
 (defun org-asana--sync-from-asana ()
   "Sync tasks from Asana to org."
   (let* ((user-workspace-info (org-asana--get-user-and-workspace-info))
-         (user-gid (nth 0 user-workspace-info))
-         (workspace-gid (nth 1 user-workspace-info))
+         (user-gid (org-asana--get-user-gid user-workspace-info))
+         (workspace-gid (org-asana--get-workspace-gid user-workspace-info))
          (tasks (org-asana--fetch-incomplete-tasks user-gid workspace-gid))
          (task-tree (org-asana--build-task-tree tasks)))
-
     (org-asana--process-task-tree task-tree)))
 
 (defun org-asana--find-active-tasks-region ()
@@ -656,23 +676,35 @@
 
 ;;; Data Transformation Functions
 
+(defun org-asana--json-null-p (value)
+  "Check if VALUE represents JSON null."
+  (or (eq value :null) (eq value nil)))
+
 (defun org-asana--parse-asana-timestamp (timestamp-str)
   "Parse Asana timestamp string to Emacs time."
   (when (and timestamp-str
-             (not (eq timestamp-str :null))
+             (not (org-asana--json-null-p timestamp-str))
              (not (string-empty-p timestamp-str)))
     (date-to-time timestamp-str)))
 
 (defun org-asana--format-asana-date (date-str)
   "Format Asana DATE-STR for org-mode deadline."
   (when (and date-str
-             (not (eq date-str :null))
+             (not (org-asana--json-null-p date-str))
              (not (string-empty-p date-str)))
     (format-time-string "<%Y-%m-%d %a>" (date-to-time date-str))))
 
+(defun org-asana--json-true-p (value)
+  "Check if VALUE represents JSON true."
+  (or (eq value t) (eq value :true) (eq value 'true)))
+
+(defun org-asana--json-false-p (value)
+  "Check if VALUE represents JSON false."
+  (or (eq value :false) (eq value nil) (eq value 'false)))
+
 (defun org-asana--get-org-todo-state (completed)
   "Get org TODO state based on COMPLETED boolean."
-  (if (or (eq completed t) (eq completed :true) (eq completed 'true)) "DONE" "TODO"))
+  (if (org-asana--json-true-p completed) "DONE" "TODO"))
 
 (defun org-asana--get-asana-completed (todo-state)
   "Get Asana completed boolean from org TODO-STATE."
