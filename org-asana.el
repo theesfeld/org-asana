@@ -405,7 +405,9 @@
 (defun org-asana--create-new-task (task-fields parent-pos)
   "Create new task from TASK-FIELDS under PARENT-POS."
   (let ((completed (plist-get task-fields :completed)))
-    (unless completed  ; Don't create new completed tasks
+    ;; Only create incomplete tasks in Active Projects section
+    ;; JSON false comes as :false, not nil
+    (unless (or (eq completed t) (eq completed :true))
       (save-excursion
         (goto-char parent-pos)
         (org-end-of-subtree t)
