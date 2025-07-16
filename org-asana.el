@@ -567,7 +567,8 @@ Set to 1 to disable retries entirely."
 (defun org-asana--sync-bidirectional ()
   "Sync tasks between org and Asana."
   (org-asana--sync-from-asana)
-  (org-asana--sync-to-asana))
+  ;; Skip sync-to-asana after fetching from Asana to avoid unnecessary API calls
+  )
 
 (defun org-asana--apply-visual-enhancements ()
   "Apply visual enhancements to synced tasks."
@@ -1582,18 +1583,16 @@ Uses org-map-entries for robust subtree boundary handling."
   "Update current heading text to NEW-TEXT."
   (save-excursion
     (org-back-to-heading t)
-    (when (looking-at org-complex-heading-regexp)
-      (let ((todo (match-string 2))
-            (priority (match-string 3))
-            (tags (match-string 5))
-            (level (org-current-level)))
-        (beginning-of-line)
-        (delete-region (point) (line-end-position))
-        (insert (make-string level ?*) " "
-                (or todo "") (if todo " " "")
-                (or priority "") (if priority " " "")
-                new-text
-                (or tags ""))))))
+    (let ((current-heading (org-get-heading t t t t))
+          (current-todo (org-get-todo-state))
+          (current-priority (org-entry-get nil "PRIORITY"))
+          (current-tags (org-get-tags)))
+      ;; Only update if the heading text is actually different
+      (unless (string= current-heading new-text)
+        (org-edit-headline new-text)
+        ;; Ensure TODO state is preserved or set to TODO if missing
+        (unless current-todo
+          (org-todo "TODO"))))))
 
 (defun org-asana--get-task-body ()
   "Get the body text of current task."
