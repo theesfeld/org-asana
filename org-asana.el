@@ -64,40 +64,6 @@
 (require 'url)
 (require 'json)
 
-;;; Forward Declarations
-
-(declare-function org-asana-fetch-user-info "org-asana")
-(declare-function org-asana-fetch-workspaces "org-asana")
-(declare-function org-asana-fetch-all-my-tasks "org-asana")
-(declare-function org-asana-fetch-tasks-with-due-dates "org-asana")
-(declare-function org-asana-fetch-my-tasks "org-asana")
-(declare-function org-asana-fetch-task "org-asana")
-(declare-function org-asana-create-task "org-asana")
-(declare-function org-asana-update-task "org-asana")
-(declare-function org-asana-delete-task "org-asana")
-(declare-function org-asana--get-workspace-gid "org-asana")
-(declare-function org-asana--get-all-org-asana-entries "org-asana")
-(declare-function org-asana--find-org-entry-by-task-id "org-asana")
-(declare-function org-asana--needs-sync-p "org-asana")
-(declare-function org-asana--resolve-conflict "org-asana")
-(declare-function org-asana--sync-task-to-org "org-asana")
-(declare-function org-asana--sync-org-to-asana "org-asana")
-(declare-function org-asana--compare-timestamps "org-asana")
-(declare-function org-asana-sync-from-asana "org-asana")
-(declare-function org-asana-sync-to-asana "org-asana")
-(declare-function org-asana-sync-bidirectional "org-asana")
-(declare-function org-asana-sync "org-asana")
-(declare-function org-asana-start-periodic-sync "org-asana")
-(declare-function org-asana-stop-periodic-sync "org-asana")
-(declare-function org-asana--agenda-add-asana-info "org-asana")
-(declare-function org-asana-agenda-sync "org-asana")
-(declare-function org-asana-agenda-create-task "org-asana")
-(declare-function org-asana-agenda-open-in-asana "org-asana")
-(declare-function org-asana-create-task-from-heading "org-asana")
-(declare-function org-asana-import-my-tasks "org-asana")
-(declare-function org-asana-delete-task-interactive "org-asana")
-(declare-function org-asana-open-in-asana "org-asana")
-(declare-function org-asana-update-from-heading "org-asana")
 
 ;;; Constants and Configuration
 
@@ -204,6 +170,14 @@ When nil, tasks will be added to the current buffer."
 
 (defvar org-asana--cached-projects nil
   "Cached list of available projects.")
+
+(defvar org-asana-agenda-mode nil
+  "Variable for org-asana-agenda-mode minor mode.")
+(make-variable-buffer-local 'org-asana-agenda-mode)
+
+(defvar org-asana-mode nil
+  "Variable for org-asana-mode minor mode.")
+(make-variable-buffer-local 'org-asana-mode)
 
 ;;; Utility Functions
 
@@ -570,7 +544,7 @@ CALLBACK is optional async callback function. If nil, uses synchronous request."
                         (org-asana--parse-json-response buffer)
                       (org-asana--handle-http-error status)))
                 (error "Invalid HTTP response from Asana")))
-          (kill-buffer buffer)))))
+          (kill-buffer buffer))))))
 
 (defun org-asana-fetch-user-info ()
   "Fetch current user information from Asana."
@@ -772,14 +746,14 @@ Returns :org or :asana depending on resolution strategy."
               (let ((winner (org-asana--resolve-conflict org-entry-data task)))
                 (when (eq winner :asana)
                   (org-cut-subtree)
-                  (insert (org-asana-task-to-org-entry task))))))))
+                  (insert (org-asana-task-to-org-entry task)))))))
 
       ;; New task - only add if incomplete (we don't want to import completed tasks)
       (let ((completed (alist-get 'completed task)))
         (unless (or (eq completed t) (eq completed :true))
           (goto-char (point-max))
           (unless (bolp) (insert "\n"))
-        (insert (org-asana-task-to-org-entry task))))))
+          (insert (org-asana-task-to-org-entry task)))))))
 
 (defun org-asana--sync-org-to-asana (entry-data task-id)
   "Sync org ENTRY-DATA to Asana for TASK-ID."
@@ -1005,6 +979,7 @@ Works from any buffer if TARGET-BUFFER or org-asana-org-file is set."
 (define-minor-mode org-asana-agenda-mode
   "Minor mode for Asana integration in org-agenda."
   :lighter " Asana"
+  :variable org-asana-agenda-mode
   :keymap (let ((map (make-sparse-keymap)))
             (define-key map (kbd "C-c a s") #'org-asana-agenda-sync)
             (define-key map (kbd "C-c a c") #'org-asana-agenda-create-task)
@@ -1125,6 +1100,7 @@ Works from any buffer if TARGET-BUFFER or org-asana-org-file is set."
 (define-minor-mode org-asana-mode
   "Minor mode for Asana integration in org-mode."
   :lighter " Asana"
+  :variable org-asana-mode
   :keymap org-asana-mode-map
   (if org-asana-mode
       (progn
@@ -1179,7 +1155,7 @@ Works from any buffer if TARGET-BUFFER or org-asana-org-file is set."
                     (message "  - %s (completed: %s)"
                             (alist-get 'name task)
                             (if (alist-get 'completed task) "yes" "no"))
-                    (setq count (1+ count))))))))
+                    (setq count (1+ count)))))))
 
         (message "=== END DEBUG INFO ==="))
 
