@@ -714,6 +714,72 @@ Set to 1 to disable retries entirely."
          (workspace-gid (alist-get 'gid (car workspaces))))
     (list user-gid workspace-gid)))
 
+(defun org-asana--extract-page-data (response)
+  "Extract data from paginated RESPONSE."
+  (alist-get 'data response))
+
+(defun org-asana--extract-next-page (response)
+  "Extract next page path from RESPONSE."
+  (let ((next-page-info (alist-get 'next_page response)))
+    (when next-page-info
+      (alist-get 'path next-page-info))))
+
+(defun org-asana--report-page-progress (page-count total-items)
+  "Report progress for PAGE-COUNT with TOTAL-ITEMS."
+  (message "Fetched page %d (%d items so far)" page-count total-items))
+
+(defun org-asana--handle-pagination-error (error-count max-errors page-count err)
+  "Handle pagination error and return updated error count."
+  (let ((new-error-count (1+ error-count)))
+    (when org-asana-debug
+      (message "Error fetching page %d: %s" (1+ page-count) (error-message-string err)))
+    new-error-count))
+
+(defun org-asana--should-stop-pagination-p (error-count max-errors)
+  "Check if pagination should stop due to errors."
+  (>= error-count max-errors))
+
+(defun org-asana--report-pagination-stop (max-errors total-items)
+  "Report pagination stopped due to errors."
+  (message "WARNING: Stopped pagination after %d consecutive errors. Fetched %d items total." 
+          max-errors total-items))
+
+(defun org-asana--report-pagination-error (page-count error-count max-errors)
+  "Report pagination error but continuing."
+  (message "Error on page %d, continuing... (%d/%d errors)" 
+          (1+ page-count) error-count max-errors))
+
+(defun org-asana--report-pagination-completion (error-count total-items)
+  "Report pagination completion with error summary."
+  (when (> error-count 0)
+    (message "Completed with %d items fetched despite %d error(s)" 
+            total-items error-count)))
+
+(defun org-asana--fetch-single-page (endpoint)
+  "Fetch single page from ENDPOINT."
+  (org-asana--make-request-with-retry "GET" endpoint nil 1))
+
+(defun org-asana--process-page-success (response all-data page-count)
+  "Process successful page RESPONSE and return (data next-page page-count)."
+  (let ((data (org-asana--extract-page-data response))
+        (next-page (org-asana--extract-next-page response))
+        (new-page-count (1+ page-count)))
+    (when data
+      (setq all-data (append all-data data)))
+    (org-asana--report-page-progress new-page-count (length all-data))
+    (list all-data next-page new-page-count 0))) ; Reset error count on success
+
+(defun org-asana--process-page-error (err error-count max-errors page-count all-data)
+  "Process page error and return (data next-page page-count error-count)."
+  (let ((new-error-count (org-asana--handle-pagination-error error-count max-errors page-count err)))
+    (if (org-asana--should-stop-pagination-p new-error-count max-errors)
+        (progn
+          (org-asana--report-pagination-stop max-errors (length all-data))
+          (list all-data nil page-count new-error-count))
+      (progn
+        (org-asana--report-pagination-error page-count new-error-count max-errors)
+        (list all-data nil page-count new-error-count))))) ; Don't advance to next page on error
+
 (defun org-asana--fetch-paginated (endpoint)
   "Fetch all pages from ENDPOINT."
   (let ((all-data '())
@@ -723,31 +789,20 @@ Set to 1 to disable retries entirely."
         (max-errors 3))
     (while (and next-page (< error-count max-errors))
       (condition-case err
-          (let* ((response (org-asana--make-request-with-retry "GET" next-page nil 1))
-                 (data (alist-get 'data response))
-                 (next-page-info (alist-get 'next_page response)))
-            (when data
-              (setq all-data (append all-data data)))
-            (setq page-count (1+ page-count))
-            (message "Fetched page %d (%d items so far)" page-count (length all-data))
-            (setq next-page (when next-page-info
-                             (alist-get 'path next-page-info)))
-            ;; Reset error count on success
-            (setq error-count 0))
+          (let ((result (org-asana--process-page-success 
+                        (org-asana--fetch-single-page next-page)
+                        all-data page-count)))
+            (setq all-data (nth 0 result)
+                  next-page (nth 1 result)
+                  page-count (nth 2 result)
+                  error-count (nth 3 result)))
         (error
-         (setq error-count (1+ error-count))
-         (when org-asana-debug
-           (message "Error fetching page %d: %s" (1+ page-count) (error-message-string err)))
-         (if (>= error-count max-errors)
-             (progn
-               (message "WARNING: Stopped pagination after %d consecutive errors. Fetched %d items total." 
-                       max-errors (length all-data))
-               (setq next-page nil))
-           (message "Error on page %d, continuing... (%d/%d errors)" 
-                   (1+ page-count) error-count max-errors)))))
-    (when (> error-count 0)
-      (message "Completed with %d items fetched despite %d error(s)" 
-              (length all-data) error-count))
+         (let ((result (org-asana--process-page-error err error-count max-errors page-count all-data)))
+           (setq all-data (nth 0 result)
+                 next-page (nth 1 result)
+                 page-count (nth 2 result)
+                 error-count (nth 3 result))))))
+    (org-asana--report-pagination-completion error-count (length all-data))
     all-data))
 
 (defun org-asana--fetch-incomplete-tasks (user-gid workspace-gid)
@@ -774,52 +829,99 @@ Set to 1 to disable retries entirely."
       (setq cleaned (replace-regexp-in-string "changed the name to " "renamed to: " cleaned))
       cleaned)))
 
+(defun org-asana--extract-story-data (story)
+  "Extract relevant data from STORY."
+  (list :gid (alist-get 'gid story)
+        :text (alist-get 'text story)
+        :created-at (alist-get 'created_at story)
+        :created-by (alist-get 'name (alist-get 'created_by story))
+        :type (alist-get 'type story)))
+
+(defun org-asana--format-story-timestamp (created-at)
+  "Format CREATED-AT timestamp for display."
+  (if created-at
+      (format-time-string "%Y-%m-%d %H:%M"
+                         (org-asana--parse-asana-timestamp created-at))
+    "Unknown time"))
+
+(defun org-asana--format-single-comment (story-data)
+  "Format single comment from STORY-DATA."
+  (let ((gid (plist-get story-data :gid))
+        (text (plist-get story-data :text))
+        (created-at (plist-get story-data :created-at))
+        (created-by (plist-get story-data :created-by)))
+    (format "- %s (%s): %s\n  :PROPERTIES:\n  :ASANA-COMMENT-GID: %s\n  :END:"
+            (or created-by "Unknown")
+            (org-asana--format-story-timestamp created-at)
+            text
+            gid)))
+
+(defun org-asana--format-single-history (story-data)
+  "Format single history entry from STORY-DATA."
+  (let ((gid (plist-get story-data :gid))
+        (text (plist-get story-data :text))
+        (created-at (plist-get story-data :created-at))
+        (created-by (plist-get story-data :created-by)))
+    (format "- [%s] %s: %s\n  :PROPERTIES:\n  :ASANA-STORY-GID: %s\n  :END:"
+            (org-asana--format-story-timestamp created-at)
+            (or created-by "System")
+            (org-asana--clean-story-text text)
+            gid)))
+
+(defun org-asana--process-story-for-comments (story)
+  "Process STORY and return formatted comment or nil."
+  (when (and (listp story) (alist-get 'text story))
+    (let ((story-data (org-asana--extract-story-data story))
+          (type (alist-get 'type story)))
+      (when (string= type "comment")
+        (org-asana--format-single-comment story-data)))))
+
+(defun org-asana--process-story-for-history (story)
+  "Process STORY and return formatted history or nil."
+  (when (and (listp story) (alist-get 'text story))
+    (let ((story-data (org-asana--extract-story-data story))
+          (type (alist-get 'type story)))
+      (when (string= type "system")
+        (org-asana--format-single-history story-data)))))
+
+(defun org-asana--collect-comments (stories)
+  "Collect formatted comments from STORIES."
+  (let ((comments '()))
+    (dolist (story stories)
+      (let ((comment (org-asana--process-story-for-comments story)))
+        (when comment
+          (push comment comments))))
+    (nreverse comments)))
+
+(defun org-asana--collect-history (stories)
+  "Collect formatted history from STORIES."
+  (let ((history '()))
+    (dolist (story stories)
+      (let ((entry (org-asana--process-story-for-history story)))
+        (when entry
+          (push entry history))))
+    (nreverse history)))
+
+(defun org-asana--build-comments-section (comments)
+  "Build comments section from COMMENTS list."
+  (concat "***** Comments\n"
+          (if comments
+              (concat (string-join comments "\n\n") "\n")
+            "")))
+
+(defun org-asana--build-history-section (history)
+  "Build history section from HISTORY list."
+  (when (and org-asana-show-activity-history history)
+    (concat "\n***** Activity History\n"
+            (string-join history "\n\n") "\n")))
+
 (defun org-asana--format-comments (stories)
   "Format STORIES list for org-mode display, separating comments and history."
-  (let ((formatted-comments '())
-        (formatted-history '()))
-    (when (and stories (listp stories))
-      (dolist (story stories)
-        (when (listp story)
-          (let ((gid (alist-get 'gid story))
-                (text (alist-get 'text story))
-                (created-at (alist-get 'created_at story))
-                (created-by (alist-get 'name (alist-get 'created_by story)))
-                (type (alist-get 'type story)))
-            (cond
-             ;; User comments
-             ((string= type "comment")
-              (when text
-                (push (format "- %s (%s): %s\n  :PROPERTIES:\n  :ASANA-COMMENT-GID: %s\n  :END:"
-                             (or created-by "Unknown")
-                             (if created-at
-                                 (format-time-string "%Y-%m-%d %H:%M"
-                                                   (org-asana--parse-asana-timestamp created-at))
-                               "Unknown time")
-                             text
-                             gid)
-                      formatted-comments)))
-             ;; System stories (history)
-             ((string= type "system")
-              (when text
-                (push (format "- [%s] %s: %s\n  :PROPERTIES:\n  :ASANA-STORY-GID: %s\n  :END:"
-                             (if created-at
-                                 (format-time-string "%Y-%m-%d %H:%M"
-                                                   (org-asana--parse-asana-timestamp created-at))
-                               "Unknown time")
-                             (or created-by "System")
-                             (org-asana--clean-story-text text)
-                             gid)
-                      formatted-history))))))))
-    ;; Return both sections
-    (concat
-     "***** Comments\n"
-     (if formatted-comments
-         (concat (string-join (nreverse formatted-comments) "\n\n") "\n")
-       "")
-     (when (and org-asana-show-activity-history formatted-history)
-       (concat "\n***** Activity History\n"
-               (string-join (nreverse formatted-history) "\n\n") "\n")))))
+  (when (and stories (listp stories))
+    (let ((comments (org-asana--collect-comments stories))
+          (history (org-asana--collect-history stories)))
+      (concat (org-asana--build-comments-section comments)
+              (org-asana--build-history-section history)))))
 
 (defun org-asana--format-attachments (attachments)
   "Format ATTACHMENTS list for org-mode display."
@@ -1000,78 +1102,114 @@ Set to 1 to disable retries entirely."
       ;; Remove SCHEDULED if no start date
       (org-schedule '(4)))))
 
-(defun org-asana--update-task-properties (task-fields)
-  "Update task properties from TASK-FIELDS."
-  ;; Permalink
+(defun org-asana--update-permalink-property (task-fields)
+  "Update permalink property from TASK-FIELDS."
   (let ((permalink (plist-get task-fields :permalink-url)))
     (when (and permalink (not (string-empty-p permalink)))
-      (org-set-property "ASANA-URL" permalink)))
+      (org-set-property "ASANA-URL" permalink))))
 
-  ;; Followers
+(defun org-asana--update-followers-property (task-fields)
+  "Update followers property from TASK-FIELDS."
   (let ((followers (plist-get task-fields :followers)))
     (when followers
-      (let ((follower-names (mapconcat
-                            (lambda (f) (alist-get 'name f))
-                            followers ", ")))
+      (let ((follower-names (org-asana--format-follower-names followers)))
         (when (not (string-empty-p follower-names))
-          (org-set-property "ASANA-FOLLOWERS" follower-names)))))
+          (org-set-property "ASANA-FOLLOWERS" follower-names))))))
 
-  ;; Parent task
+(defun org-asana--format-follower-names (followers)
+  "Format FOLLOWERS list into comma-separated names."
+  (mapconcat (lambda (f) (alist-get 'name f)) followers ", "))
+
+(defun org-asana--update-parent-properties (task-fields)
+  "Update parent task properties from TASK-FIELDS."
   (let ((parent (plist-get task-fields :parent)))
     (when parent
       (org-set-property "ASANA-PARENT-GID" (alist-get 'gid parent))
-      (org-set-property "ASANA-PARENT-NAME" (alist-get 'name parent))))
+      (org-set-property "ASANA-PARENT-NAME" (alist-get 'name parent)))))
 
-  ;; Projects (multiple)
+(defun org-asana--update-projects-property (task-fields)
+  "Update projects property from TASK-FIELDS."
   (let ((projects (plist-get task-fields :projects)))
     (when projects
-      (let ((project-names (mapconcat
-                           (lambda (p) (alist-get 'name p))
-                           projects ", ")))
+      (let ((project-names (org-asana--format-project-names projects)))
         (when (not (string-empty-p project-names))
-          (org-set-property "ASANA-PROJECTS" project-names)))))
+          (org-set-property "ASANA-PROJECTS" project-names))))))
 
-  ;; Dependencies
+(defun org-asana--format-project-names (projects)
+  "Format PROJECTS list into comma-separated names."
+  (mapconcat (lambda (p) (alist-get 'name p)) projects ", "))
+
+(defun org-asana--update-dependencies-property (task-fields)
+  "Update dependencies property from TASK-FIELDS."
   (let ((dependencies (plist-get task-fields :dependencies)))
     (when dependencies
-      (let ((dep-names (mapconcat
-                       (lambda (d)
-                         (format "%s (%s)" (alist-get 'name d) (alist-get 'gid d)))
-                       dependencies ", ")))
+      (let ((dep-names (org-asana--format-dependency-names dependencies)))
         (when (not (string-empty-p dep-names))
-          (org-set-property "ASANA-DEPENDENCIES" dep-names)))))
+          (org-set-property "ASANA-DEPENDENCIES" dep-names))))))
 
-  ;; Dependents
+(defun org-asana--update-dependents-property (task-fields)
+  "Update dependents property from TASK-FIELDS."
   (let ((dependents (plist-get task-fields :dependents)))
     (when dependents
-      (let ((dep-names (mapconcat
-                       (lambda (d)
-                         (format "%s (%s)" (alist-get 'name d) (alist-get 'gid d)))
-                       dependents ", ")))
+      (let ((dep-names (org-asana--format-dependency-names dependents)))
         (when (not (string-empty-p dep-names))
-          (org-set-property "ASANA-DEPENDENTS" dep-names)))))
+          (org-set-property "ASANA-DEPENDENTS" dep-names))))))
 
-  ;; Likes/Hearts
+(defun org-asana--format-dependency-names (dependencies)
+  "Format DEPENDENCIES list into name(gid) pairs."
+  (mapconcat
+   (lambda (d) (format "%s (%s)" (alist-get 'name d) (alist-get 'gid d)))
+   dependencies ", "))
+
+(defun org-asana--update-reactions-property (task-fields)
+  "Update reactions property from TASK-FIELDS."
   (let ((num-likes (plist-get task-fields :num-likes))
         (num-hearts (plist-get task-fields :num-hearts))
         (liked (plist-get task-fields :liked))
         (hearted (plist-get task-fields :hearted)))
-    (when (or (> num-likes 0) (> num-hearts 0))
+    (when (org-asana--has-reactions-p num-likes num-hearts)
       (org-set-property "ASANA-REACTIONS"
-                       (format "👍 %d%s | ❤️ %d%s"
-                              num-likes (if liked " (liked)" "")
-                              num-hearts (if hearted " (hearted)" "")))))
+                       (org-asana--format-reactions num-likes liked num-hearts hearted)))))
 
-  ;; Custom fields
+(defun org-asana--has-reactions-p (num-likes num-hearts)
+  "Check if task has any reactions."
+  (or (> num-likes 0) (> num-hearts 0)))
+
+(defun org-asana--format-reactions (num-likes liked num-hearts hearted)
+  "Format reactions string from counts and user status."
+  (format "👍 %d%s | ❤️ %d%s"
+          num-likes (if liked " (liked)" "")
+          num-hearts (if hearted " (hearted)" "")))
+
+(defun org-asana--update-custom-fields-properties (task-fields)
+  "Update custom field properties from TASK-FIELDS."
   (let ((custom-fields (plist-get task-fields :custom-fields)))
     (when custom-fields
       (dolist (field custom-fields)
-        (let ((field-name (alist-get 'name field))
-              (field-value (org-asana--extract-custom-field-value field)))
-          (when (and field-name field-value)
-            (org-set-property (format "ASANA-CF-%s"
-                                    (upcase (replace-regexp-in-string " " "-" field-name)))
-                            field-value)))))))
+        (org-asana--set-custom-field-property field)))))
+
+(defun org-asana--set-custom-field-property (field)
+  "Set property for single custom FIELD."
+  (let ((field-name (alist-get 'name field))
+        (field-value (org-asana--extract-custom-field-value field)))
+    (when (and field-name field-value)
+      (org-set-property (org-asana--format-custom-field-property-name field-name)
+                       field-value))))
+
+(defun org-asana--format-custom-field-property-name (field-name)
+  "Format custom FIELD-NAME into property name."
+  (format "ASANA-CF-%s" (upcase (replace-regexp-in-string " " "-" field-name))))
+
+(defun org-asana--update-task-properties (task-fields)
+  "Update all task properties from TASK-FIELDS."
+  (org-asana--update-permalink-property task-fields)
+  (org-asana--update-followers-property task-fields)
+  (org-asana--update-parent-properties task-fields)
+  (org-asana--update-projects-property task-fields)
+  (org-asana--update-dependencies-property task-fields)
+  (org-asana--update-dependents-property task-fields)
+  (org-asana--update-reactions-property task-fields)
+  (org-asana--update-custom-fields-properties task-fields))
 
 (defun org-asana--extract-custom-field-value (field)
   "Extract value from custom FIELD based on its type."
