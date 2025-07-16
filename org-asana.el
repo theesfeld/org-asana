@@ -19,7 +19,7 @@
 ;; Maintainer: William Theesfeld <william@theesfeld.net>
 ;; Created: 15 July 2024
 ;; Version: 2.0.0
-;; Package-Requires: ((emacs "27.1") (org "9.4"))
+;; Package-Requires: ((emacs "28.1") (org "9.4"))
 ;; Keywords: convenience, org-mode, asana, productivity
 ;; URL: https://github.com/wtheesfeld/org-asana
 
@@ -42,6 +42,14 @@
 (require 'org)
 (require 'url)
 (require 'json)
+(require 'cl-lib)
+(require 'org-agenda)
+(require 'org-capture)
+
+;;; Variable declarations to suppress warnings
+(defvar org-agenda-custom-commands)
+(defvar org-capture-templates)
+(defvar org-asana-org-file)
 
 ;;; Custom Faces
 
@@ -1433,13 +1441,17 @@ Uses org-map-entries for robust subtree boundary handling."
                  (string :tag "Project GID"))
   :group 'org-asana)
 
+(defun org-asana--get-capture-file ()
+  "Get the org-asana file for capture templates."
+  org-asana-org-file)
+
 (defvar org-asana-capture-templates
   '(("a" "Asana Task" entry
-     (file+headline org-asana-org-file "Active Projects")
+     (file+headline org-asana--get-capture-file "Active Projects")
      "* TODO %^{Task Title}\n:PROPERTIES:\n:asana-id: new\n:asana-project: %(org-asana--select-project)\n:END:\nDEADLINE: %^t\n\n%?"
      :empty-lines-after 1)
     ("A" "Asana Task with Notes" entry
-     (file+headline org-asana-org-file "Active Projects")
+     (file+headline org-asana--get-capture-file "Active Projects")
      "* TODO %^{Task Title}\n:PROPERTIES:\n:asana-id: new\n:asana-project: %(org-asana--select-project)\n:END:\nDEADLINE: %^t\n\n%^{Task Notes}\n\n%?"
      :empty-lines-after 1))
   "Capture templates for creating new Asana tasks.")
@@ -1482,15 +1494,15 @@ Uses org-map-entries for robust subtree boundary handling."
   (save-excursion
     (goto-char (point-min))
     (while (re-search-forward ":asana-id: *new" nil t)
-      (let* ((task-data (org-asana--extract-task-data))
+      (let* ((task-data (org-asana--extract-new-task-data))
              (project-gid (org-entry-get nil "asana-project"))
              (created-task (org-asana--create-task-in-asana task-data project-gid)))
         (when created-task
           (org-set-property "asana-id" (alist-get 'gid created-task))
           (org-delete-property "asana-project"))))))
 
-(defun org-asana--extract-task-data ()
-  "Extract task data from current org entry."
+(defun org-asana--extract-new-task-data ()
+  "Extract task data from current org entry for new task creation."
   (let ((heading (org-get-heading t t t t))
         (deadline (org-entry-get nil "DEADLINE"))
         (notes (org-asana--get-task-notes)))
