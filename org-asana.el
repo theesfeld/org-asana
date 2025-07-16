@@ -64,6 +64,41 @@
 (require 'url)
 (require 'json)
 
+;;; Forward Declarations
+
+(declare-function org-asana-fetch-user-info "org-asana")
+(declare-function org-asana-fetch-workspaces "org-asana")
+(declare-function org-asana-fetch-all-my-tasks "org-asana")
+(declare-function org-asana-fetch-tasks-with-due-dates "org-asana")
+(declare-function org-asana-fetch-my-tasks "org-asana")
+(declare-function org-asana-fetch-task "org-asana")
+(declare-function org-asana-create-task "org-asana")
+(declare-function org-asana-update-task "org-asana")
+(declare-function org-asana-delete-task "org-asana")
+(declare-function org-asana--get-workspace-gid "org-asana")
+(declare-function org-asana--get-all-org-asana-entries "org-asana")
+(declare-function org-asana--find-org-entry-by-task-id "org-asana")
+(declare-function org-asana--needs-sync-p "org-asana")
+(declare-function org-asana--resolve-conflict "org-asana")
+(declare-function org-asana--sync-task-to-org "org-asana")
+(declare-function org-asana--sync-org-to-asana "org-asana")
+(declare-function org-asana--compare-timestamps "org-asana")
+(declare-function org-asana-sync-from-asana "org-asana")
+(declare-function org-asana-sync-to-asana "org-asana")
+(declare-function org-asana-sync-bidirectional "org-asana")
+(declare-function org-asana-sync "org-asana")
+(declare-function org-asana-start-periodic-sync "org-asana")
+(declare-function org-asana-stop-periodic-sync "org-asana")
+(declare-function org-asana--agenda-add-asana-info "org-asana")
+(declare-function org-asana-agenda-sync "org-asana")
+(declare-function org-asana-agenda-create-task "org-asana")
+(declare-function org-asana-agenda-open-in-asana "org-asana")
+(declare-function org-asana-create-task-from-heading "org-asana")
+(declare-function org-asana-import-my-tasks "org-asana")
+(declare-function org-asana-delete-task-interactive "org-asana")
+(declare-function org-asana-open-in-asana "org-asana")
+(declare-function org-asana-update-from-heading "org-asana")
+
 ;;; Constants and Configuration
 
 (defgroup org-asana nil
@@ -144,6 +179,16 @@ When nil, tasks will be added to the current buffer."
 (defcustom org-asana-heading-level 2
   "Org heading level to use for Asana tasks."
   :type 'integer
+  :group 'org-asana)
+
+(defcustom org-asana-include-project-context t
+  "If non-nil, include project names in org heading for context."
+  :type 'boolean
+  :group 'org-asana)
+
+(defcustom org-asana-sync-only-with-due-dates nil
+  "If non-nil, only sync tasks that have due dates."
+  :type 'boolean
   :group 'org-asana)
 
 ;;; Internal Variables
@@ -502,7 +547,7 @@ CALLBACK is optional async callback function. If nil, uses synchronous request."
     (if callback
         ;; Async request
         (url-retrieve url
-                     (lambda (status)
+                     (lambda (_status)
                        (let ((response-buffer (current-buffer)))
                          (unwind-protect
                              (progn
@@ -586,16 +631,6 @@ CALLBACK is optional async callback function. If nil, uses synchronous request."
          (search-response (org-asana--make-request "GET" search-endpoint))
          (tasks (alist-get 'data search-response)))
     tasks))
-
-(defcustom org-asana-sync-only-with-due-dates nil
-  "If non-nil, only sync tasks that have due dates."
-  :type 'boolean
-  :group 'org-asana)
-
-(defcustom org-asana-include-project-context t
-  "If non-nil, include project names in org heading for context."
-  :type 'boolean
-  :group 'org-asana)
 
 (defun org-asana-fetch-tasks-with-due-dates ()
   "Fetch all incomplete tasks with due dates assigned to the current user."
@@ -785,7 +820,7 @@ Returns :org or :asana depending on resolution strategy."
         ;; Update existing tasks (let needs-sync-p decide what to update)
         (dolist (entry local-entries)
           (let* ((task-id (car entry))
-                 (entry-data (cdr entry)))
+                 (_entry-data (cdr entry)))
             (setq processed-count (1+ processed-count))
             (when (= 0 (% processed-count 5))
               (message "Processing existing task %d of %d..." processed-count total-local))
@@ -866,7 +901,8 @@ Returns :org or :asana depending on resolution strategy."
 
 ;;;###autoload
 (defun org-asana-sync (&optional target-buffer)
-  "Main synchronization command. Works from any buffer if TARGET-BUFFER or org-asana-org-file is set."
+  "Main synchronization command.
+Works from any buffer if TARGET-BUFFER or org-asana-org-file is set."
   (interactive)
   (let ((sync-buffer (or target-buffer
                         (when org-asana-org-file
@@ -1148,7 +1184,7 @@ Returns :org or :asana depending on resolution strategy."
         (message "=== END DEBUG INFO ==="))
 
     (error
-     (message "Error during debug: %s" (error-message-string err)))))
+     (message "Error during debug: %s" (error-message-string err))))))
 
 (provide 'org-asana)
 ;;; org-asana.el ends here
