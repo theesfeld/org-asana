@@ -43,6 +43,159 @@
 (require 'url)
 (require 'json)
 
+;;; Custom Faces
+
+(defface org-asana-overdue
+  '((t :foreground "red" :weight bold))
+  "Face for overdue Asana tasks."
+  :group 'org-asana)
+
+(defface org-asana-priority-high
+  '((t :foreground "orange" :weight bold))
+  "Face for high priority Asana tasks."
+  :group 'org-asana)
+
+(defface org-asana-priority-medium
+  '((t :foreground "yellow"))
+  "Face for medium priority Asana tasks."
+  :group 'org-asana)
+
+(defface org-asana-priority-low
+  '((t :foreground "gray"))
+  "Face for low priority Asana tasks."
+  :group 'org-asana)
+
+(defface org-asana-due-today
+  '((t :foreground "green" :slant italic))
+  "Face for Asana tasks due today."
+  :group 'org-asana)
+
+(defface org-asana-due-soon
+  '((t :foreground "orange" :slant italic))
+  "Face for Asana tasks due soon (within 3 days)."
+  :group 'org-asana)
+
+;;; Face application functions
+
+(defun org-asana--apply-task-faces ()
+  "Apply custom faces to all Asana tasks in buffer."
+  (save-excursion
+    (goto-char (point-min))
+    (while (re-search-forward "^\\*+ " nil t)
+      (when (org-entry-get nil "asana-id")
+        (org-asana--fontify-task)))))
+
+(defun org-asana--fontify-task ()
+  "Apply appropriate face to current task."
+  (let ((deadline (org-entry-get nil "DEADLINE"))
+        (priority (org-entry-get nil "PRIORITY")))
+    (when deadline
+      (org-asana--apply-deadline-face deadline))
+    (when priority
+      (org-asana--apply-priority-face priority))))
+
+(defun org-asana--apply-deadline-face (deadline)
+  "Apply face based on DEADLINE."
+  (let ((days-until (org-asana--days-until-deadline deadline)))
+    (org-asana--apply-face-for-days days-until)))
+
+(defun org-asana--days-until-deadline (deadline)
+  "Calculate days until DEADLINE from current time."
+  (let ((deadline-time (org-time-string-to-time deadline))
+        (current-time (current-time)))
+    (/ (float-time (time-subtract deadline-time current-time))
+       86400)))
+
+(defun org-asana--apply-face-for-days (days)
+  "Apply appropriate face based on DAYS until deadline."
+  (let ((face (org-asana--select-deadline-face days)))
+    (when face
+      (org-asana--apply-line-face face))))
+
+(defun org-asana--select-deadline-face (days)
+  "Select appropriate face for DAYS until deadline."
+  (cond
+   ((< days 0) 'org-asana-overdue)
+   ((< days 1) 'org-asana-due-today)
+   ((< days 7) 'org-asana-due-soon)))
+
+(defun org-asana--apply-line-face (face)
+  "Apply FACE to current line."
+  (save-excursion
+    (beginning-of-line)
+    (add-text-properties (point) (line-end-position)
+                        `(face ,face))))
+
+(defun org-asana--apply-priority-face (priority)
+  "Apply face based on PRIORITY."
+  (save-excursion
+    (beginning-of-line)
+    (cond
+     ((string= priority "[#A]")
+      (add-text-properties (point) (line-end-position)
+                          '(face org-asana-priority-high)))
+     ((string= priority "[#B]")
+      (add-text-properties (point) (line-end-position)
+                          '(face org-asana-priority-medium)))
+     ((string= priority "[#C]")
+      (add-text-properties (point) (line-end-position)
+                          '(face org-asana-priority-low))))))
+
+;;; Org Agenda Integration
+
+(defun org-asana-agenda-files ()
+  "Return list containing org-asana file for agenda inclusion."
+  (when (and org-asana-org-file
+             (file-exists-p org-asana-org-file))
+    (list org-asana-org-file)))
+
+(defun org-asana--setup-agenda ()
+  "Setup org-agenda to include Asana tasks."
+  (when org-asana-org-file
+    (add-to-list 'org-agenda-files org-asana-org-file t)))
+
+(defun org-asana--remove-from-agenda ()
+  "Remove Asana file from org-agenda-files."
+  (when org-asana-org-file
+    (setq org-agenda-files
+          (delete org-asana-org-file org-agenda-files))))
+
+(defcustom org-asana-agenda-skip-completed t
+  "Skip completed Asana tasks in agenda views."
+  :type 'boolean
+  :group 'org-asana)
+
+(defun org-asana-agenda-skip-function ()
+  "Skip function for org-agenda to handle Asana tasks."
+  (when (and org-asana-agenda-skip-completed
+             (org-entry-get nil "asana-id")
+             (org-entry-is-done-p))
+    (org-end-of-subtree t)))
+
+(defvar org-asana-agenda-custom-commands
+  '(("A" . "Asana tasks")
+    ("Aa" "All Asana tasks" tags "asana-id={.+}"
+     ((org-agenda-overriding-header "All Asana Tasks")))
+    ("Ad" "Asana tasks due today" tags "asana-id={.+}"
+     ((org-agenda-overriding-header "Asana Tasks Due Today")
+      (org-agenda-skip-function
+       '(org-agenda-skip-entry-if 'notdeadline))
+      (org-agenda-span 'day)))
+    ("Aw" "Asana tasks this week" tags "asana-id={.+}"
+     ((org-agenda-overriding-header "Asana Tasks This Week")
+      (org-agenda-skip-function
+       '(org-agenda-skip-entry-if 'notdeadline))
+      (org-agenda-span 'week)))
+    ("Ap" "Asana tasks by priority" tags "asana-id={.+}"
+     ((org-agenda-overriding-header "Asana Tasks by Priority")
+      (org-agenda-sorting-strategy '(priority-down deadline-up)))))
+  "Custom agenda commands for Asana tasks.")
+
+(defun org-asana--add-agenda-commands ()
+  "Add Asana-specific commands to org-agenda."
+  (dolist (cmd org-asana-agenda-custom-commands)
+    (add-to-list 'org-agenda-custom-commands cmd t)))
+
 ;;; Configuration Variables
 
 (defgroup org-asana nil
@@ -86,7 +239,43 @@
 (defconst org-asana-api-base-url "https://app.asana.com/api/1.0"
   "Base URL for Asana API endpoints.")
 
+;;; Rate Limiting Variables
+
+(defvar org-asana--rate-limit-remaining 150
+  "Remaining API calls in current window.")
+
+(defvar org-asana--rate-limit-reset nil
+  "Time when rate limit resets.")
+
+(defvar org-asana--last-request-time nil
+  "Time of last API request.")
+
 ;;; HTTP/API Functions
+
+(defun org-asana--check-rate-limit ()
+  "Check if API call can be made."
+  (when (and org-asana--rate-limit-reset
+             (time-less-p (current-time) org-asana--rate-limit-reset)
+             (<= org-asana--rate-limit-remaining 0))
+    (org-asana--wait-for-rate-limit))
+  t)
+
+(defun org-asana--wait-for-rate-limit ()
+  "Wait until rate limit allows calls."
+  (let ((wait-time (if org-asana--rate-limit-reset
+                       (max 1 (float-time (time-subtract org-asana--rate-limit-reset (current-time))))
+                     30)))
+    (message "Rate limited. Waiting %.0f seconds..." wait-time)
+    (sleep-for wait-time)))
+
+(defun org-asana--update-rate-limit (headers)
+  "Update rate limit from response HEADERS."
+  (let ((remaining (cdr (assoc "x-ratelimit-remaining" headers)))
+        (reset (cdr (assoc "x-ratelimit-reset" headers))))
+    (when remaining
+      (setq org-asana--rate-limit-remaining (string-to-number remaining)))
+    (when reset
+      (setq org-asana--rate-limit-reset (seconds-to-time (string-to-number reset))))))
 
 (defun org-asana--http-headers ()
   "Return HTTP headers for Asana API requests."
@@ -166,23 +355,85 @@
         (json-parse-buffer :object-type 'alist :array-type 'list)
       (error (error "Invalid JSON response from Asana API")))))
 
-(defun org-asana--make-request (method endpoint &optional data)
-  "Make HTTP request to Asana API."
-  (let* ((url (org-asana--api-url endpoint))
-         (url-request-method method)
-         (url-request-extra-headers (org-asana--http-headers))
-         (url-request-data (when data (org-asana--encode-json-data data)))
-         (buffer (url-retrieve-synchronously url)))
+(defun org-asana--extract-headers (buffer)
+  "Extract HTTP headers from BUFFER."
+  (with-current-buffer buffer
+    (goto-char (point-min))
+    (let ((headers '()))
+      (while (re-search-forward "^\\([^:]+\\): \\(.+\\)$" nil t)
+        (push (cons (downcase (match-string 1)) (match-string 2)) headers))
+      headers)))
+
+(defun org-asana--make-request-with-retry (method endpoint &optional data max-retries)
+  "Make request with retry logic and rate limiting."
+  (let ((attempt 0)
+        (max-attempts (or max-retries 3))
+        (result nil)
+        (success nil))
+    (while (and (< attempt max-attempts) (not success))
+      (condition-case err
+          (progn
+            (org-asana--check-rate-limit)
+            (setq result (org-asana--make-request-internal method endpoint data)
+                  success t))
+        (error
+         (setq attempt (1+ attempt))
+         (if (>= attempt max-attempts)
+             (signal (car err) (cdr err))
+           (let ((delay (org-asana--calculate-retry-delay attempt)))
+             (message "Request failed, retrying in %d seconds..." delay)
+             (sleep-for delay))))))
+    result))
+
+(defun org-asana--make-request-internal (method endpoint &optional data)
+  "Internal request function with rate limit tracking."
+  (let ((buffer (org-asana--execute-http-request method endpoint data)))
     (unwind-protect
-        (with-current-buffer buffer
-          (goto-char (point-min))
-          (if (re-search-forward "^HTTP/[0-9.]+ \\([0-9]+\\)" nil t)
-              (let ((status (string-to-number (match-string 1))))
-                (if (and (>= status 200) (< status 300))
-                    (org-asana--parse-json-response buffer)
-                  (error "Asana API error: HTTP %d" status)))
-            (error "Invalid HTTP response from Asana")))
+        (org-asana--process-http-response buffer)
       (kill-buffer buffer))))
+
+(defun org-asana--execute-http-request (method endpoint data)
+  "Execute HTTP METHOD request to ENDPOINT with optional DATA."
+  (let ((url (org-asana--api-url endpoint))
+        (url-request-method method)
+        (url-request-extra-headers (org-asana--http-headers))
+        (url-request-data (when data (org-asana--encode-json-data data))))
+    (url-retrieve-synchronously url)))
+
+(defun org-asana--process-http-response (buffer)
+  "Process HTTP response in BUFFER."
+  (with-current-buffer buffer
+    (goto-char (point-min))
+    (let ((status (org-asana--extract-http-status)))
+      (org-asana--handle-http-status status buffer))))
+
+(defun org-asana--extract-http-status ()
+  "Extract HTTP status code from current buffer."
+  (if (re-search-forward "^HTTP/[0-9.]+ \\([0-9]+\\)" nil t)
+      (string-to-number (match-string 1))
+    (error "Invalid HTTP response from Asana")))
+
+(defun org-asana--handle-http-status (status buffer)
+  "Handle HTTP STATUS code and return response from BUFFER."
+  (let ((headers (org-asana--extract-headers buffer)))
+    (org-asana--update-rate-limit headers)
+    (cond
+     ((= status 429) (org-asana--handle-rate-limit))
+     ((org-asana--status-ok-p status) (org-asana--parse-json-response buffer))
+     (t (error "Asana API error: HTTP %d" status)))))
+
+(defun org-asana--handle-rate-limit ()
+  "Handle rate limit error."
+  (org-asana--wait-for-rate-limit)
+  (error "Rate limited"))
+
+(defun org-asana--status-ok-p (status)
+  "Check if STATUS indicates success."
+  (and (>= status 200) (< status 300)))
+
+(defun org-asana--make-request (method endpoint &optional data)
+  "Make HTTP request to Asana API with rate limiting."
+  (org-asana--make-request-with-retry method endpoint data))
 
 ;;; Public Commands
 
@@ -200,38 +451,54 @@
      (message "Connection failed: %s" (error-message-string err))
      nil)))
 
+(defun org-asana--validate-configuration ()
+  "Validate token and org file configuration."
+  (unless org-asana-token
+    (error "No Asana token configured. Set `org-asana-token'"))
+  (unless org-asana-org-file
+    (error "No org file configured. Set `org-asana-org-file'")))
+
+(defun org-asana--initialize-buffer (buffer)
+  "Initialize BUFFER with proper structure."
+  (with-current-buffer buffer
+    (unless (derived-mode-p 'org-mode)
+      (org-mode))
+    (when (= (buffer-size) 0)
+      (insert "* Active Projects\n\n* COMPLETED\n")
+      (goto-char (point-min)))))
+
+(defun org-asana--orchestrate-sync (buffer)
+  "Orchestrate sync process in BUFFER."
+  (with-current-buffer buffer
+    (org-asana--perform-sync-operations)
+    (org-asana--apply-visual-enhancements)
+    (save-buffer)))
+
+(defun org-asana--perform-sync-operations ()
+  "Perform core sync operations in order."
+  (org-asana--process-new-captures)
+  (org-asana--sync-done-tasks)
+  (org-asana--sync-bidirectional))
+
+(defun org-asana--sync-bidirectional ()
+  "Sync tasks between org and Asana."
+  (org-asana--sync-from-asana)
+  (org-asana--sync-to-asana))
+
+(defun org-asana--apply-visual-enhancements ()
+  "Apply visual enhancements to synced tasks."
+  (org-asana--update-progress-indicators)
+  (org-asana--apply-task-faces))
+
 ;;;###autoload
 (defun org-asana-sync ()
   "Sync tasks between Org and Asana."
   (interactive)
-  (unless org-asana-token
-    (error "No Asana token configured. Set `org-asana-token'"))
-  (unless org-asana-org-file
-    (error "No org file configured. Set `org-asana-org-file'"))
-
-  ;; Open or create the target file
+  (org-asana--validate-configuration)
   (let ((buffer (find-file-noselect org-asana-org-file)))
-    (with-current-buffer buffer
-      ;; Ensure we're in org-mode
-      (unless (derived-mode-p 'org-mode)
-        (org-mode))
-
-      ;; Initialize file structure if empty
-      (when (= (buffer-size) 0)
-        (insert "* Active Projects\n\n* COMPLETED\n")
-        (goto-char (point-min)))
-
-      ;; Sync local DONE tasks to Asana and move to COMPLETED
-      (org-asana--sync-done-tasks)
-
-      ;; Sync from Asana
-      (org-asana--sync-from-asana)
-
-      ;; Sync pending changes to Asana
-      (org-asana--sync-to-asana)
-
-      (save-buffer)
-      (message "Sync complete"))))
+    (org-asana--initialize-buffer buffer)
+    (org-asana--orchestrate-sync buffer)
+    (message "Sync complete")))
 
 ;;; Internal Sync Functions
 
@@ -353,14 +620,28 @@
          (workspace-gid (alist-get 'gid (car workspaces))))
     (list user-gid workspace-gid)))
 
+(defun org-asana--fetch-paginated (endpoint)
+  "Fetch all pages from ENDPOINT."
+  (let ((all-data '())
+        (next-page endpoint)
+        (page-count 0))
+    (while next-page
+      (let* ((response (org-asana--make-request "GET" next-page))
+             (data (alist-get 'data response))
+             (next-page-info (alist-get 'next_page response)))
+        (setq all-data (append all-data data))
+        (setq page-count (1+ page-count))
+        (message "Fetched page %d (%d items so far)" page-count (length all-data))
+        (setq next-page (when next-page-info
+                         (alist-get 'path next-page-info)))))
+    all-data))
+
 (defun org-asana--fetch-incomplete-tasks (user-gid workspace-gid)
   "Fetch incomplete tasks assigned to USER-GID from WORKSPACE-GID."
   (let ((opt-fields "gid,name,notes,completed,due_on,modified_at,priority,tags.name,memberships.project.name,memberships.section.name,permalink_url"))
-    (alist-get 'data
-               (org-asana--make-request
-                "GET"
-                (format "/workspaces/%s/tasks/search?assignee.any=%s&completed=false&limit=100&opt_fields=%s"
-                        workspace-gid user-gid opt-fields)))))
+    (org-asana--fetch-paginated
+     (format "/workspaces/%s/tasks/search?assignee.any=%s&completed=false&limit=100&opt_fields=%s"
+             workspace-gid user-gid opt-fields))))
 
 
 (defun org-asana--format-comments (comments)
@@ -410,17 +691,17 @@
          (sections (cdr project-entry))
          ;; Only create project heading if it has sections with tasks
          (has-tasks nil))
-    
+
     ;; Check if any section has tasks
     (dolist (section-entry sections)
       (when (cdr section-entry)
         (setq has-tasks t)))
-    
+
     (when has-tasks
       (let ((project-pos (org-asana--find-or-create-heading
                          2 project-name section-start)))
         (goto-char project-pos)
-        
+
         (dolist (section-entry sections)
           (let* ((section-name (car section-entry))
                  (tasks (cdr section-entry)))
@@ -429,7 +710,7 @@
               (let ((section-pos (org-asana--find-or-create-heading
                                  3 section-name project-pos)))
                 (goto-char section-pos)
-                
+
                 (dolist (task tasks)
                   (org-asana--update-or-create-task task section-pos batch-data))))))))))
 
@@ -447,7 +728,7 @@
 
       ;; Clean up any empty sections/projects from previous syncs
       (org-asana--cleanup-empty-sections)
-      
+
       (org-asana--update-statistics))))
 
 (defun org-asana--sync-done-tasks ()
@@ -476,23 +757,52 @@
 
 (defun org-asana--apply-asana-updates (task-fields)
   "Apply TASK-FIELDS updates to current org entry."
-  (let ((task-name (plist-get task-fields :task-name))
-        (completed (plist-get task-fields :completed))
-        (due-on (plist-get task-fields :due-on))
-        (modified-at (plist-get task-fields :modified-at))
-        (priority (plist-get task-fields :priority))
-        (tags (plist-get task-fields :tags)))
+  (org-asana--update-task-state task-fields)
+  (org-asana--update-task-heading task-fields)
+  (org-asana--update-task-deadline task-fields)
+  (org-asana--update-task-priority task-fields)
+  (org-asana--update-task-tags task-fields)
+  (org-asana--update-task-timestamp task-fields))
 
-    (org-todo (org-asana--get-org-todo-state completed))
-    (org-asana--update-heading task-name)
+(defun org-asana--update-task-state (task-fields)
+  "Update task TODO state from TASK-FIELDS."
+  (let ((completed (plist-get task-fields :completed)))
+    (org-todo (org-asana--get-org-todo-state completed))))
+
+(defun org-asana--update-task-heading (task-fields)
+  "Update task heading from TASK-FIELDS."
+  (let ((task-name (plist-get task-fields :task-name)))
+    (org-asana--update-heading task-name)))
+
+(defun org-asana--update-task-deadline (task-fields)
+  "Update task deadline from TASK-FIELDS."
+  (let ((due-on (plist-get task-fields :due-on)))
     (when due-on
-      (let ((formatted-date (org-asana--format-asana-date due-on)))
-        (when formatted-date
-          (org-deadline nil formatted-date))))
-    (when (and org-asana-sync-priority priority)
-      (org-asana--set-priority priority))
-    (when (and org-asana-sync-tags tags)
-      (org-asana--set-tags tags))
+      (org-asana--set-deadline due-on))))
+
+(defun org-asana--set-deadline (due-on)
+  "Set deadline to DUE-ON date."
+  (let ((formatted-date (org-asana--format-asana-date due-on)))
+    (when formatted-date
+      (org-deadline nil formatted-date))))
+
+(defun org-asana--update-task-priority (task-fields)
+  "Update task priority from TASK-FIELDS."
+  (when org-asana-sync-priority
+    (let ((priority (plist-get task-fields :priority)))
+      (when priority
+        (org-asana--set-priority priority)))))
+
+(defun org-asana--update-task-tags (task-fields)
+  "Update task tags from TASK-FIELDS."
+  (when org-asana-sync-tags
+    (let ((tags (plist-get task-fields :tags)))
+      (when tags
+        (org-asana--set-tags tags)))))
+
+(defun org-asana--update-task-timestamp (task-fields)
+  "Update task modification timestamp from TASK-FIELDS."
+  (let ((modified-at (plist-get task-fields :modified-at)))
     (org-set-property "ASANA_MODIFIED" modified-at)))
 
 (defun org-asana--update-existing-task (task-fields existing-pos)
@@ -639,16 +949,39 @@
   "Extract workspace GID from USER-WORKSPACE-INFO."
   (nth 1 user-workspace-info))
 
-(defun org-asana--sync-from-asana ()
-  "Sync tasks from Asana to org."
+(defun org-asana--get-workspace-info ()
+  "Get user and workspace GIDs from Asana."
   (let* ((user-workspace-info (org-asana--get-user-and-workspace-info))
          (user-gid (org-asana--get-user-gid user-workspace-info))
-         (workspace-gid (org-asana--get-workspace-gid user-workspace-info))
-         (tasks (org-asana--fetch-incomplete-tasks user-gid workspace-gid))
-         (task-ids (mapcar (lambda (task) (alist-get 'gid task)) tasks))
-         (batch-data (org-asana--fetch-task-data-batch task-ids))
-         (task-tree (org-asana--build-task-tree tasks)))
-    (org-asana--process-task-tree task-tree batch-data)))
+         (workspace-gid (org-asana--get-workspace-gid user-workspace-info)))
+    (list user-gid workspace-gid)))
+
+(defun org-asana--fetch-task-metadata (task-ids)
+  "Fetch comments and attachments for TASK-IDS."
+  (org-asana--fetch-task-data-batch task-ids))
+
+(defun org-asana--extract-task-gids (tasks)
+  "Extract GIDs from TASKS list."
+  (mapcar (lambda (task) (alist-get 'gid task)) tasks))
+
+(defun org-asana--sync-from-asana ()
+  "Sync tasks from Asana to org."
+  (let* ((tasks (org-asana--fetch-user-tasks))
+         (metadata (org-asana--fetch-tasks-metadata tasks))
+         (tree (org-asana--build-task-tree tasks)))
+    (org-asana--process-task-tree tree metadata)))
+
+(defun org-asana--fetch-user-tasks ()
+  "Fetch all incomplete tasks for current user."
+  (let ((workspace-info (org-asana--get-workspace-info)))
+    (org-asana--fetch-incomplete-tasks
+     (car workspace-info)
+     (cadr workspace-info))))
+
+(defun org-asana--fetch-tasks-metadata (tasks)
+  "Fetch metadata for all TASKS."
+  (let ((task-ids (org-asana--extract-task-gids tasks)))
+    (org-asana--fetch-task-metadata task-ids)))
 
 (defun org-asana--find-active-tasks-region ()
   "Find the start and end positions of Active Projects section."
@@ -735,6 +1068,22 @@
 (defun org-asana--json-null-p (value)
   "Check if VALUE represents JSON null."
   (or (eq value :null) (eq value nil)))
+
+(defun org-asana--format-timestamp (timestamp)
+  "Format TIMESTAMP to readable string."
+  (if timestamp
+      (format-time-string "%Y-%m-%d %H:%M" timestamp)
+    ""))
+
+(defun org-asana--calculate-retry-delay (attempt)
+  "Calculate exponential backoff delay for ATTEMPT."
+  (* attempt attempt 2))
+
+(defun org-asana--validate-response (response)
+  "Validate API RESPONSE structure."
+  (and response
+       (listp response)
+       (alist-get 'data response)))
 
 (defun org-asana--parse-asana-timestamp (timestamp-str)
   "Parse Asana timestamp string to Emacs time."
@@ -969,40 +1318,231 @@ Uses org-map-entries for robust subtree boundary handling."
 
 (defun org-asana--cleanup-empty-sections ()
   "Remove empty sections and projects in Active Projects."
+  (let ((active-end (org-asana--find-active-projects-end)))
+    (when active-end
+      (org-asana--cleanup-empty-subtrees "^\\*\\*\\* " active-end)
+      (org-asana--cleanup-empty-subtrees "^\\*\\* " active-end))))
+
+(defun org-asana--find-active-projects-end ()
+  "Find end position of Active Projects section."
   (save-excursion
     (goto-char (point-min))
     (when (re-search-forward "^\\* Active Projects$" nil t)
-      (let ((active-end (save-excursion
-                         (if (re-search-forward "^\\* COMPLETED$" nil t)
-                             (match-beginning 0)
-                           (point-max)))))
-        ;; Clean up empty sections first
-        (goto-char (point))
-        (while (re-search-forward "^\\*\\*\\* " active-end t)
-          (let ((section-start (match-beginning 0))
-                (has-tasks nil))
-            (save-excursion
-              (org-end-of-subtree t)
-              (let ((section-end (point)))
-                (goto-char section-start)
-                (setq has-tasks (re-search-forward "^\\*\\*\\*\\* " section-end t))))
-            (unless has-tasks
-              (goto-char section-start)
-              (org-cut-subtree))))
-        
-        ;; Then clean up empty projects
-        (goto-char (point))
-        (while (re-search-forward "^\\*\\* " active-end t)
-          (let ((project-start (match-beginning 0))
-                (has-sections nil))
-            (save-excursion
-              (org-end-of-subtree t)
-              (let ((project-end (point)))
-                (goto-char project-start)
-                (setq has-sections (re-search-forward "^\\*\\*\\* " project-end t))))
-            (unless has-sections
-              (goto-char project-start)
-              (org-cut-subtree))))))))
+      (if (re-search-forward "^\\* COMPLETED$" nil t)
+          (match-beginning 0)
+        (point-max)))))
+
+(defun org-asana--cleanup-empty-subtrees (pattern end-pos)
+  "Remove empty subtrees matching PATTERN before END-POS."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward "^\\* Active Projects$" nil t)
+      (while (re-search-forward pattern end-pos t)
+        (let ((start (match-beginning 0)))
+          (when (org-asana--subtree-empty-p start pattern)
+            (org-asana--remove-subtree start)))))))
+
+(defun org-asana--subtree-empty-p (start pattern)
+  "Check if subtree at START has children matching PATTERN."
+  (save-excursion
+    (goto-char start)
+    (org-end-of-subtree t)
+    (let ((end (point))
+          (child-pattern (org-asana--get-child-pattern pattern)))
+      (goto-char start)
+      (not (re-search-forward child-pattern end t)))))
+
+(defun org-asana--get-child-pattern (parent-pattern)
+  "Get child heading pattern for PARENT-PATTERN."
+  (cond
+   ((string= parent-pattern "^\\*\\*\\* ") "^\\*\\*\\*\\* ")
+   ((string= parent-pattern "^\\*\\* ") "^\\*\\*\\* ")
+   (t nil)))
+
+(defun org-asana--remove-subtree (pos)
+  "Remove subtree at position POS."
+  (save-excursion
+    (goto-char pos)
+    (org-cut-subtree)))
+
+;;; Progress Indicators
+
+(defcustom org-asana-show-progress-indicators t
+  "Show progress indicators for projects and sections."
+  :type 'boolean
+  :group 'org-asana)
+
+(defun org-asana--calculate-progress ()
+  "Calculate progress statistics for current heading."
+  (let ((total 0)
+        (done 0))
+    (save-excursion
+      (when (org-goto-first-child)
+        (cl-loop do
+                 (when (org-entry-get nil "asana-id")
+                   (cl-incf total)
+                   (when (org-entry-is-done-p)
+                     (cl-incf done)))
+                 while (org-goto-sibling))))
+    (cons done total)))
+
+(defun org-asana--format-progress-indicator (done total)
+  "Format progress indicator showing DONE of TOTAL tasks."
+  (if (zerop total)
+      ""
+    (format "[%d/%d]" done total)))
+
+(defun org-asana--update-progress-indicators ()
+  "Update progress indicators for all projects and sections."
+  (when org-asana-show-progress-indicators
+    (save-excursion
+      (goto-char (point-min))
+      (while (re-search-forward "^\\*\\{1,3\\} " nil t)
+        (let ((level (org-current-level)))
+          (when (and (<= level 3)
+                     (not (org-entry-get nil "asana-id")))
+            (org-asana--update-heading-progress)))))))
+
+(defun org-asana--update-heading-progress ()
+  "Update progress indicator for current heading."
+  (let* ((progress (org-asana--calculate-progress))
+         (done (car progress))
+         (total (cdr progress))
+         (indicator (org-asana--format-progress-indicator done total)))
+    (save-excursion
+      (beginning-of-line)
+      (when (looking-at "^\\(\\*+\\) \\(.*?\\)\\( \\[[0-9]+/[0-9]+\\]\\)?$")
+        (let ((stars (match-string 1))
+              (title (match-string 2)))
+          (delete-region (point) (line-end-position))
+          (insert stars " " title
+                  (if (string-empty-p indicator) "" (concat " " indicator))))))))
+
+(defun org-asana--remove-progress-indicators ()
+  "Remove all progress indicators from buffer."
+  (save-excursion
+    (goto-char (point-min))
+    (while (re-search-forward " \\[[0-9]+/[0-9]+\\]" nil t)
+      (replace-match ""))))
+
+;;; Capture Templates
+
+(defcustom org-asana-default-project nil
+  "Default Asana project GID for new tasks."
+  :type '(choice (const :tag "No default project" nil)
+                 (string :tag "Project GID"))
+  :group 'org-asana)
+
+(defvar org-asana-capture-templates
+  '(("a" "Asana Task" entry
+     (file+headline org-asana-org-file "Active Projects")
+     "* TODO %^{Task Title}\n:PROPERTIES:\n:asana-id: new\n:asana-project: %(org-asana--select-project)\n:END:\nDEADLINE: %^t\n\n%?"
+     :empty-lines-after 1)
+    ("A" "Asana Task with Notes" entry
+     (file+headline org-asana-org-file "Active Projects")
+     "* TODO %^{Task Title}\n:PROPERTIES:\n:asana-id: new\n:asana-project: %(org-asana--select-project)\n:END:\nDEADLINE: %^t\n\n%^{Task Notes}\n\n%?"
+     :empty-lines-after 1))
+  "Capture templates for creating new Asana tasks.")
+
+(defun org-asana--select-project ()
+  "Select an Asana project for new task."
+  (if org-asana-default-project
+      org-asana-default-project
+    (let* ((projects (org-asana--fetch-all-projects))
+           (project-names (mapcar (lambda (p) (alist-get 'name p)) projects))
+           (selected (completing-read "Select project: " project-names nil t)))
+      (alist-get 'gid (cl-find selected projects
+                                :key (lambda (p) (alist-get 'name p))
+                                :test 'string=)))))
+
+(defun org-asana--fetch-all-projects ()
+  "Fetch all accessible Asana projects."
+  (let ((endpoint "/projects?opt_fields=name,gid&workspace=")
+        (projects '()))
+    (dolist (workspace (org-asana--fetch-workspaces))
+      (let ((workspace-gid (alist-get 'gid workspace)))
+        (setq projects
+              (append projects
+                      (alist-get 'data
+                                (org-asana--fetch-paginated
+                                 (concat endpoint workspace-gid)))))))
+    projects))
+
+(defun org-asana--fetch-workspaces ()
+  "Fetch all accessible Asana workspaces."
+  (alist-get 'data (org-asana--make-request "GET" "/workspaces")))
+
+(defun org-asana--add-capture-templates ()
+  "Add Asana capture templates to org-capture."
+  (dolist (template org-asana-capture-templates)
+    (add-to-list 'org-capture-templates template t)))
+
+(defun org-asana--process-new-captures ()
+  "Process tasks marked as new and create them in Asana."
+  (save-excursion
+    (goto-char (point-min))
+    (while (re-search-forward ":asana-id: *new" nil t)
+      (let* ((task-data (org-asana--extract-task-data))
+             (project-gid (org-entry-get nil "asana-project"))
+             (created-task (org-asana--create-task-in-asana task-data project-gid)))
+        (when created-task
+          (org-set-property "asana-id" (alist-get 'gid created-task))
+          (org-delete-property "asana-project"))))))
+
+(defun org-asana--extract-task-data ()
+  "Extract task data from current org entry."
+  (let ((heading (org-get-heading t t t t))
+        (deadline (org-entry-get nil "DEADLINE"))
+        (notes (org-asana--get-task-notes)))
+    `((name . ,heading)
+      ,@(when deadline `((due_on . ,(org-asana--format-date-for-asana deadline))))
+      ,@(when notes `((notes . ,notes))))))
+
+(defun org-asana--get-task-notes ()
+  "Get task notes from current entry."
+  (save-excursion
+    (org-back-to-heading t)
+    (forward-line)
+    (let ((start (point))
+          (end (save-excursion (outline-next-heading) (point))))
+      (buffer-substring-no-properties start end))))
+
+(defun org-asana--format-date-for-asana (org-date)
+  "Convert ORG-DATE to Asana date format (YYYY-MM-DD)."
+  (format-time-string "%Y-%m-%d" (org-time-string-to-time org-date)))
+
+(defun org-asana--create-task-in-asana (task-data project-gid)
+  "Create TASK-DATA in PROJECT-GID on Asana."
+  (let ((data `((data . ((projects . (,project-gid))
+                        ,@task-data)))))
+    (alist-get 'data (org-asana--make-request "POST" "/tasks" data))))
+
+;;; Initialization
+
+(defun org-asana-enable-agenda-integration ()
+  "Enable Org Agenda integration for Asana tasks."
+  (interactive)
+  (org-asana--setup-agenda)
+  (org-asana--add-agenda-commands)
+  (message "Org-Asana agenda integration enabled"))
+
+(defun org-asana-disable-agenda-integration ()
+  "Disable Org Agenda integration for Asana tasks."
+  (interactive)
+  (org-asana--remove-from-agenda)
+  (message "Org-Asana agenda integration disabled"))
+
+(defun org-asana-enable-capture-templates ()
+  "Enable Org Capture templates for Asana tasks."
+  (interactive)
+  (org-asana--add-capture-templates)
+  (message "Org-Asana capture templates enabled"))
+
+;; Auto-enable agenda integration when org-asana-org-file is set
+(add-hook 'after-init-hook
+          (lambda ()
+            (when org-asana-org-file
+              (org-asana-enable-agenda-integration))))
 
 (provide 'org-asana)
 ;;; org-asana.el ends here
