@@ -61,6 +61,26 @@
   :type 'file
   :group 'org-asana)
 
+(defcustom org-asana-conflict-resolution 'newest-wins
+  "Strategy for resolving conflicts between Org and Asana data.
+\='newest-wins uses modification timestamps to determine winner.
+\='asana-wins always prefers Asana data over Org data.
+\='local-wins always prefers Org data over Asana data."
+  :type '(choice (const :tag "Newest modification wins" newest-wins)
+                 (const :tag "Asana always wins" asana-wins)
+                 (const :tag "Local org always wins" local-wins))
+  :group 'org-asana)
+
+(defcustom org-asana-sync-tags t
+  "Whether to synchronize Org tags with Asana tags."
+  :type 'boolean
+  :group 'org-asana)
+
+(defcustom org-asana-sync-priority t
+  "Whether to synchronize Org priority with Asana priority."
+  :type 'boolean
+  :group 'org-asana)
+
 ;;; Constants
 
 (defconst org-asana-api-base-url "https://app.asana.com/api/1.0"
@@ -253,7 +273,7 @@
          (user-gid (alist-get 'gid user-info))
          (workspaces (alist-get 'data (org-asana--make-request "GET" "/workspaces")))
          (workspace-gid (alist-get 'gid (car workspaces)))
-         (opt-fields "gid,name,notes,completed,due_on,modified_at,memberships.project.name,memberships.section.name")
+         (opt-fields "gid,name,notes,completed,due_on,modified_at,priority,tags.name,memberships.project.name,memberships.section.name")
          (tasks (alist-get 'data 
                           (org-asana--make-request 
                            "GET" 
@@ -313,10 +333,14 @@
                      (completed (string= todo-state "DONE"))
                      (deadline (org-entry-get nil "DEADLINE"))
                      (body (org-asana--get-task-body))
+                     (priority (org-entry-get nil "PRIORITY"))
+                     (tags (org-get-tags))
                      (due-date (when deadline
                                 (format-time-string 
                                  "%Y-%m-%d"
-                                 (org-time-string-to-time deadline)))))
+                                 (org-time-string-to-time deadline))))
+                     (asana-priority (when (and org-asana-sync-priority priority)
+                                      (org-asana--get-asana-priority priority))))
                 
                 (condition-case nil
                     (org-asana--make-request
@@ -325,8 +349,90 @@
                      `((data . ((name . ,heading)
                                (notes . ,body)
                                (completed . ,completed)
-                               ,@(when due-date `((due_on . ,due-date)))))))
+                               ,@(when due-date `((due_on . ,due-date)))
+                               ,@(when asana-priority `((priority . ,asana-priority)))))))
                   (error nil))))))))))
+
+;;; Data Transformation Functions
+
+(defun org-asana--parse-asana-timestamp (timestamp-str)
+  "Parse Asana timestamp string to Emacs time."
+  (when (and timestamp-str 
+             (not (eq timestamp-str :null))
+             (not (string-empty-p timestamp-str)))
+    (date-to-time timestamp-str)))
+
+(defun org-asana--get-org-todo-state (completed)
+  "Get org TODO state based on COMPLETED boolean."
+  (if (or (eq completed t) (eq completed :true)) "DONE" "TODO"))
+
+(defun org-asana--get-asana-completed (todo-state)
+  "Get Asana completed boolean from org TODO-STATE."
+  (string= todo-state "DONE"))
+
+(defun org-asana--format-org-priority (asana-priority)
+  "Convert ASANA-PRIORITY to org priority."
+  (cond
+   ((string= asana-priority "high") "[#A]")
+   ((string= asana-priority "medium") "[#B]")
+   ((string= asana-priority "low") "[#C]")
+   (t "")))
+
+(defun org-asana--get-asana-priority (org-priority)
+  "Convert org priority character to Asana priority."
+  (cond
+   ((string= org-priority "A") "high")
+   ((string= org-priority "B") "medium") 
+   ((string= org-priority "C") "low")
+   (t nil)))
+
+(defun org-asana--format-org-tags (asana-tags)
+  "Convert ASANA-TAGS list to org tags string."
+  (when asana-tags
+    (concat ":" (mapconcat (lambda (tag) (alist-get 'name tag)) asana-tags ":") ":")))
+
+(defun org-asana--parse-org-tags (tags-string)
+  "Parse org TAGS-STRING to list of tag names."
+  (when (and tags-string (not (string-empty-p tags-string)))
+    (split-string (substring tags-string 1 -1) ":")))
+
+(defun org-asana--compare-timestamps (org-time asana-time-str)
+  "Compare ORG-TIME with ASANA-TIME-STR, return t if org is newer."
+  (when (and org-time asana-time-str)
+    (let ((asana-time (org-asana--parse-asana-timestamp asana-time-str)))
+      (time-less-p asana-time org-time))))
+
+(defun org-asana--needs-sync-p (org-data asana-task)
+  "Check if ORG-DATA and ASANA-TASK need synchronization."
+  (let* ((org-name (plist-get org-data :name))
+         (asana-name (alist-get 'name asana-task))
+         (org-completed (plist-get org-data :completed))
+         (asana-completed (alist-get 'completed asana-task))
+         (org-modified (plist-get org-data :modified))
+         (asana-modified (alist-get 'modified_at asana-task)))
+    
+    (or (not (string= org-name asana-name))
+        (not (eq org-completed asana-completed))
+        (and org-modified asana-modified
+             (not (string= org-modified asana-modified))))))
+
+(defun org-asana--resolve-conflict (org-data asana-task)
+  "Resolve conflict between ORG-DATA and ASANA-TASK.
+Returns :org or :asana depending on resolution strategy."
+  (cond
+   ((eq org-asana-conflict-resolution 'asana-wins) :asana)
+   ((eq org-asana-conflict-resolution 'local-wins) :org)
+   ((eq org-asana-conflict-resolution 'newest-wins)
+    (let* ((org-modified (plist-get org-data :modified))
+           (asana-modified (alist-get 'modified_at asana-task)))
+      (if (and org-modified asana-modified)
+          (if (org-asana--compare-timestamps
+               (org-asana--parse-asana-timestamp org-modified)
+               asana-modified)
+              :org
+            :asana)
+        :asana)))
+   (t :asana)))
 
 ;;; Helper Functions
 
@@ -380,17 +486,28 @@
          (notes (alist-get 'notes task))
          (due-on (alist-get 'due_on task))
          (modified-at (alist-get 'modified_at task))
+         (priority (alist-get 'priority task))
+         (tags (alist-get 'tags task))
          (existing-pos (org-asana--find-task-by-id task-id parent-pos)))
     
     (if existing-pos
-        ;; Update existing task
+        ;; Update existing task - check for conflicts
         (save-excursion
           (goto-char existing-pos)
-          (org-todo (if completed "DONE" "TODO"))
-          (org-asana--update-heading task-name)
-          (when due-on
-            (org-deadline nil due-on))
-          (org-set-property "ASANA_MODIFIED" modified-at))
+          (let* ((org-data (org-asana--extract-task-data))
+                 (winner (if (org-asana--needs-sync-p org-data task)
+                            (org-asana--resolve-conflict org-data task)
+                          :none)))
+            (when (eq winner :asana)
+              (org-todo (if completed "DONE" "TODO"))
+              (org-asana--update-heading task-name)
+              (when due-on
+                (org-deadline nil due-on))
+              (when (and org-asana-sync-priority priority)
+                (org-asana--set-priority priority))
+              (when (and org-asana-sync-tags tags)
+                (org-asana--set-tags tags))
+              (org-set-property "ASANA_MODIFIED" modified-at))))
       
       ;; Create new task
       (unless completed  ; Don't create new completed tasks
@@ -398,7 +515,16 @@
           (goto-char parent-pos)
           (org-end-of-subtree t)
           (unless (bolp) (insert "\n"))
-          (insert (format "**** TODO %s\n" task-name))
+          (let* ((todo-state (org-asana--get-org-todo-state completed))
+                 (priority-str (when (and org-asana-sync-priority priority)
+                                (org-asana--format-org-priority priority)))
+                 (tags-str (when (and org-asana-sync-tags tags)
+                            (org-asana--format-org-tags tags))))
+            (insert (format "**** %s %s%s%s\n" 
+                           todo-state
+                           (or priority-str "")
+                           task-name
+                           (or tags-str ""))))
           (when due-on
             (org-deadline nil due-on))
           (org-set-property "ASANA_TASK_ID" task-id)
@@ -447,6 +573,38 @@
                  (org-end-of-subtree t)
                  (point))))
       (string-trim (buffer-substring-no-properties start end)))))
+
+(defun org-asana--extract-task-data ()
+  "Extract task data from current org entry."
+  (save-excursion
+    (org-back-to-heading t)
+    (let* ((heading (org-get-heading t t t t))
+           (todo-state (org-get-todo-state))
+           (priority (org-entry-get nil "PRIORITY"))
+           (tags (org-get-tags))
+           (modified (org-entry-get nil "ASANA_MODIFIED"))
+           (completed (org-asana--get-asana-completed todo-state)))
+      `(:name ,heading
+        :completed ,completed
+        :priority ,priority
+        :tags ,tags
+        :modified ,modified))))
+
+(defun org-asana--set-priority (asana-priority)
+  "Set org priority from ASANA-PRIORITY."
+  (let ((priority-char (cond
+                        ((string= asana-priority "high") ?A)
+                        ((string= asana-priority "medium") ?B)
+                        ((string= asana-priority "low") ?C)
+                        (t nil))))
+    (if priority-char
+        (org-priority priority-char)
+      (org-priority ?\ ))))
+
+(defun org-asana--set-tags (asana-tags)
+  "Set org tags from ASANA-TAGS."
+  (let ((tag-names (mapcar (lambda (tag) (alist-get 'name tag)) asana-tags)))
+    (org-set-tags tag-names)))
 
 (defun org-asana--update-statistics ()
   "Update TODO statistics for all projects and sections."
