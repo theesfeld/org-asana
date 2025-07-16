@@ -90,22 +90,22 @@
 
 (defcustom org-asana-sync-method 'manual
   "Method for synchronizing with Asana.
-'manual means sync only when explicitly requested.
-'periodic means automatically sync at regular intervals."
+\='manual means sync only when explicitly requested.
+\='periodic means automatically sync at regular intervals."
   :type '(choice (const :tag "Manual sync only" manual)
                  (const :tag "Periodic automatic sync" periodic))
   :group 'org-asana)
 
 (defcustom org-asana-sync-interval 15
   "Interval in minutes for periodic synchronization.
-Only used when `org-asana-sync-method' is 'periodic."
+Only used when `org-asana-sync-method\=' is \='periodic."
   :type 'integer
   :group 'org-asana)
 
 (defcustom org-asana-conflict-resolution 'newest-wins
   "Strategy for resolving conflicts between Org and Asana data.
-'newest-wins uses modification timestamps to determine winner.
-'asana-wins always prefers Asana data over Org data."
+\='newest-wins uses modification timestamps to determine winner.
+\='asana-wins always prefers Asana data over Org data."
   :type '(choice (const :tag "Newest modification wins" newest-wins)
                  (const :tag "Asana always wins" asana-wins))
   :group 'org-asana)
@@ -119,7 +119,7 @@ When nil, the first available workspace will be used."
 
 (defcustom org-asana-default-project nil
   "Default Asana project GID for new tasks.
-When nil, tasks will be created in 'My Tasks' only."
+When nil, tasks will be created in \='My Tasks\=' only."
   :type '(choice (const :tag "My Tasks only" nil)
                  (string :tag "Project GID"))
   :group 'org-asana)
@@ -267,7 +267,7 @@ When nil, tasks will be added to the current buffer."
     (error "Setup failed. Please check your token")))
 
 (defun org-asana--save-configuration ()
-  "Save current org-asana configuration to user's init file."
+  "Save current org-asana configuration to user\='s init file."
   (let ((config-string
          (format "
 ;; org-asana configuration
@@ -330,7 +330,9 @@ When nil, tasks will be added to the current buffer."
 
 (defun org-asana--parse-asana-timestamp (timestamp-str)
   "Parse Asana timestamp string to Emacs time."
-  (when timestamp-str
+  (when (and timestamp-str 
+             (not (eq timestamp-str :null))
+             (not (string-empty-p timestamp-str)))
     (date-to-time timestamp-str)))
 
 (defun org-asana--format-org-timestamp (time)
@@ -345,7 +347,7 @@ When nil, tasks will be added to the current buffer."
 
 (defun org-asana--get-org-todo-state (completed)
   "Get org TODO state based on COMPLETED boolean."
-  (if completed "DONE" "TODO"))
+  (if (or (eq completed t) (eq completed :true)) "DONE" "TODO"))
 
 (defun org-asana--get-asana-completed (todo-state)
   "Get Asana completed boolean from org TODO-STATE."
@@ -422,7 +424,7 @@ When nil, tasks will be added to the current buffer."
   (let* ((heading (plist-get entry-data :heading))
          (todo-state (plist-get entry-data :todo-state))
          (priority (plist-get entry-data :priority))
-         (tags (plist-get entry-data :tags))
+         ;; (tags (plist-get entry-data :tags))  ; Not used - Asana API doesn't support setting tags
          (deadline (plist-get entry-data :deadline))
          (body (plist-get entry-data :body))
          (properties (plist-get entry-data :properties))
@@ -535,7 +537,7 @@ METHOD is the HTTP method, ENDPOINT is the API path, DATA is optional JSON data.
                 all-tasks)))
 
 (defun org-asana-fetch-all-my-tasks ()
-  "Fetch all incomplete tasks assigned to me from all accessible workspaces and projects."
+  "Fetch all incomplete tasks assigned to me from all accessible workspaces."
   (let* ((user-info (org-asana-fetch-user-info))
          (user-gid (alist-get 'gid user-info))
          (workspace-gid (org-asana--get-workspace-gid))
@@ -691,12 +693,13 @@ Returns :org or :asana depending on resolution strategy."
               (let ((winner (org-asana--resolve-conflict org-entry-data task)))
                 (when (eq winner :asana)
                   (org-cut-subtree)
-                  (insert (org-asana-task-to-org-entry task)))))))
+                  (insert (org-asana-task-to-org-entry task))))))))
 
       ;; New task - only add if incomplete (we don't want to import completed tasks)
-      (unless (alist-get 'completed task)
-        (goto-char (point-max))
-        (unless (bolp) (insert "\n"))
+      (let ((completed (alist-get 'completed task)))
+        (unless (or (eq completed t) (eq completed :true))
+          (goto-char (point-max))
+          (unless (bolp) (insert "\n"))
         (insert (org-asana-task-to-org-entry task))))))
 
 (defun org-asana--sync-org-to-asana (entry-data task-id)
@@ -719,8 +722,8 @@ Returns :org or :asana depending on resolution strategy."
   (let ((buffer (if org-asana-org-file
                    (let ((buf (find-file-noselect org-asana-org-file)))
                      (with-current-buffer buf
-                       (unless (derived-mode-p 'org-mode)
-                         (org-mode)))
+                       ;; Always enable org-mode for Asana files
+                       (org-mode))
                      buf)
                  (current-buffer))))
 
@@ -917,7 +920,7 @@ Returns :org or :asana depending on resolution strategy."
 
 ;;;###autoload
 (defun org-asana-import-my-tasks ()
-  "Import all tasks from Asana 'My Tasks'."
+  "Import all tasks from Asana \\='My Tasks\\='."
   (interactive)
   (unless org-asana-token
     (error "Asana token not configured. Run `org-asana-setup'"))
@@ -940,7 +943,7 @@ Returns :org or :asana depending on resolution strategy."
       (message "Imported %d tasks from Asana" (length tasks)))))
 
 ;;;###autoload
-(defun org-asana-delete-task ()
+(defun org-asana-delete-task-interactive ()
   "Delete Asana task for current org heading."
   (interactive)
   (unless (org-at-heading-p)
@@ -995,7 +998,7 @@ Returns :org or :asana depending on resolution strategy."
     (define-key map (kbd "C-c a s") #'org-asana-sync)
     (define-key map (kbd "C-c a c") #'org-asana-create-task-from-heading)
     (define-key map (kbd "C-c a i") #'org-asana-import-my-tasks)
-    (define-key map (kbd "C-c a d") #'org-asana-delete-task)
+    (define-key map (kbd "C-c a d") #'org-asana-delete-task-interactive)
     (define-key map (kbd "C-c a o") #'org-asana-open-in-asana)
     (define-key map (kbd "C-c a u") #'org-asana-update-from-heading)
     (define-key map (kbd "C-c a t") #'org-asana-test-connection)
