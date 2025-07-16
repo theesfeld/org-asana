@@ -1,4 +1,4 @@
-;;; org-asana.el --- Simple two-way sync between Org-mode and Asana -*- lexical-binding: t -*-
+;;; org-asana.el --- Simple two-way sync between Org-mode and Asana -*- lexical-binding: t; -*-
 
 ;; Copyright (C) 2024 William Theesfeld <william@theesfeld.net>
 
@@ -636,7 +636,8 @@ Returns :org or :asana depending on resolution strategy."
     (let* ((stars (make-string level ?*))
            (regexp (format "^%s %s$" stars (regexp-quote heading)))
            (end-pos (save-excursion
-                     (org-end-of-subtree t)
+                     (when (org-at-heading-p)
+                       (org-end-of-subtree t))
                      (point))))
 
       (if (re-search-forward regexp end-pos t)
