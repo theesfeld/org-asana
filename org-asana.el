@@ -61,7 +61,7 @@
   :type 'file
   :group 'org-asana)
 
-(defcustom org-asana-conflict-resolution 'newest-wins
+(defcustom org-asana-conflict-resolution 'asana-wins
   "Strategy for resolving conflicts between Org and Asana data.
 \='newest-wins uses modification timestamps to determine winner.
 \='asana-wins always prefers Asana data over Org data.
@@ -295,12 +295,73 @@
 
 (defun org-asana--fetch-incomplete-tasks (user-gid workspace-gid)
   "Fetch incomplete tasks assigned to USER-GID from WORKSPACE-GID."
-  (let ((opt-fields "gid,name,notes,completed,due_on,modified_at,priority,tags.name,memberships.project.name,memberships.section.name"))
+  (let ((opt-fields "gid,name,notes,completed,due_on,modified_at,priority,tags.name,memberships.project.name,memberships.section.name,permalink_url"))
     (alist-get 'data
                (org-asana--make-request
                 "GET"
                 (format "/workspaces/%s/tasks/search?assignee.any=%s&completed=false&limit=100&opt_fields=%s"
-                        workspace-gid user-gid opt-fields)))))
+                        workspace-gid user-gid opt-fields))))
+
+(defun org-asana--fetch-task-comments (task-id)
+  "Fetch comments for TASK-ID from Asana."
+  (condition-case nil
+      (alist-get 'data
+                 (org-asana--make-request
+                  "GET"
+                  (format "/tasks/%s/stories?opt_fields=text,created_at,created_by.name,type"
+                          task-id)))
+    (error nil)))
+
+(defun org-asana--fetch-task-attachments (task-id)
+  "Fetch attachments for TASK-ID from Asana."
+  (condition-case nil
+      (alist-get 'data
+                 (org-asana--make-request
+                  "GET"
+                  (format "/tasks/%s/attachments?opt_fields=name,download_url,view_url"
+                          task-id)))
+    (error nil)))
+
+(defun org-asana--format-comments (comments)
+  "Format COMMENTS list for org-mode display."
+  (when comments
+    (let ((formatted-comments '()))
+      (dolist (comment comments)
+        (let ((text (alist-get 'text comment))
+              (created-at (alist-get 'created_at comment))
+              (created-by (alist-get 'name (alist-get 'created_by comment)))
+              (type (alist-get 'type comment)))
+          (when (and text (string= type "comment"))
+            (push (format "- %s (%s): %s"
+                         (or created-by "Unknown")
+                         (if created-at
+                             (format-time-string "%Y-%m-%d %H:%M"
+                                               (org-asana--parse-asana-timestamp created-at))
+                           "Unknown time")
+                         text)
+                  formatted-comments))))
+      (when formatted-comments
+        (concat "\n*** Comments\n"
+                (string-join (nreverse formatted-comments) "\n")
+                "\n")))))
+
+(defun org-asana--format-attachments (attachments)
+  "Format ATTACHMENTS list for org-mode display."
+  (when attachments
+    (let ((formatted-attachments '()))
+      (dolist (attachment attachments)
+        (let ((name (alist-get 'name attachment))
+              (download-url (alist-get 'download_url attachment))
+              (view-url (alist-get 'view_url attachment)))
+          (when name
+            (push (format "- [[%s][%s]]"
+                         (or view-url download-url "#")
+                         name)
+                  formatted-attachments))))
+      (when formatted-attachments
+        (concat "\n*** Attachments\n"
+                (string-join (nreverse formatted-attachments) "\n")
+                "\n"))))))
 
 (defun org-asana--process-project-sections (project-entry section-start)
   "Process PROJECT-ENTRY sections under SECTION-START."
@@ -342,14 +403,18 @@
 
 (defun org-asana--extract-task-fields (task)
   "Extract and organize fields from TASK."
-  (list :task-id (alist-get 'gid task)
-        :task-name (alist-get 'name task)
-        :completed (alist-get 'completed task)
-        :notes (alist-get 'notes task)
-        :due-on (alist-get 'due_on task)
-        :modified-at (alist-get 'modified_at task)
-        :priority (alist-get 'priority task)
-        :tags (alist-get 'tags task)))
+  (let ((task-id (alist-get 'gid task)))
+    (list :task-id task-id
+          :task-name (alist-get 'name task)
+          :completed (alist-get 'completed task)
+          :notes (alist-get 'notes task)
+          :due-on (alist-get 'due_on task)
+          :modified-at (alist-get 'modified_at task)
+          :priority (alist-get 'priority task)
+          :tags (alist-get 'tags task)
+          :permalink-url (alist-get 'permalink_url task)
+          :comments (org-asana--fetch-task-comments task-id)
+          :attachments (org-asana--fetch-task-attachments task-id))))
 
 (defun org-asana--apply-asana-updates (task-fields)
   "Apply TASK-FIELDS updates to current org entry."
@@ -360,10 +425,12 @@
         (priority (plist-get task-fields :priority))
         (tags (plist-get task-fields :tags)))
 
-    (org-todo (if completed "DONE" "TODO"))
+    (org-todo (org-asana--get-org-todo-state completed))
     (org-asana--update-heading task-name)
     (when due-on
-      (org-deadline nil due-on))
+      (let ((formatted-date (org-asana--format-asana-date due-on)))
+        (when formatted-date
+          (org-deadline nil formatted-date))))
     (when (and org-asana-sync-priority priority)
       (org-asana--set-priority priority))
     (when (and org-asana-sync-tags tags)
@@ -407,7 +474,7 @@
   (let ((completed (plist-get task-fields :completed)))
     ;; Only create incomplete tasks in Active Projects section
     ;; JSON false comes as :false, not nil
-    (unless (or (eq completed t) (eq completed :true))
+    (unless (or (eq completed t) (eq completed :true) (eq completed 'true))
       (save-excursion
         (goto-char parent-pos)
         (org-end-of-subtree t)
@@ -423,16 +490,84 @@
         (due-on (plist-get task-fields :due-on)))
 
     (when due-on
-      (org-deadline nil due-on))
+      (let ((formatted-date (org-asana--format-asana-date due-on)))
+        (when formatted-date
+          (org-deadline nil formatted-date))))
     (org-set-property "ASANA_TASK_ID" task-id)
     (org-set-property "ASANA_MODIFIED" modified-at)))
 
 (defun org-asana--add-task-notes (task-fields)
   "Add notes to task from TASK-FIELDS."
-  (let ((notes (plist-get task-fields :notes)))
+  (let ((notes (plist-get task-fields :notes))
+        (comments (plist-get task-fields :comments))
+        (attachments (plist-get task-fields :attachments))
+        (permalink-url (plist-get task-fields :permalink-url)))
+    (org-end-of-meta-data t)
     (when (and notes (not (string-empty-p notes)))
-      (org-end-of-meta-data t)
-      (insert notes "\n"))))
+      (insert notes "\n"))
+    (when permalink-url
+      (insert (format "\n[[%s][View in Asana]]\n" permalink-url)))
+    (when attachments
+      (insert (org-asana--format-attachments attachments)))
+    (when comments
+      (insert (org-asana--format-comments comments)))
+    ;; Add new comments section template
+    (insert "\n*** New Comments\n")
+    (insert ";; Add new comments here as list items (- comment text)\n")
+    (insert ";; They will be synced to Asana on next sync\n")))
+
+(defun org-asana--extract-new-comments ()
+  "Extract new comments from current org task."
+  (save-excursion
+    (org-back-to-heading t)
+    (let ((start (point))
+          (end (save-excursion (org-end-of-subtree t) (point)))
+          (new-comments '()))
+      (goto-char start)
+      (when (re-search-forward "^\\*\\*\\* New Comments$" end t)
+        (let ((comments-start (point))
+              (comments-end (save-excursion
+                             (if (re-search-forward "^\\*\\*\\* " end t)
+                                 (match-beginning 0)
+                               end))))
+          (goto-char comments-start)
+          (while (re-search-forward "^- \\(.*\\)$" comments-end t)
+            (push (match-string 1) new-comments))))
+      (nreverse new-comments))))
+
+(defun org-asana--add-comment-to-asana (task-id comment-text)
+  "Add COMMENT-TEXT to TASK-ID in Asana."
+  (condition-case nil
+      (org-asana--make-request
+       "POST"
+       (format "/tasks/%s/stories" task-id)
+       `((data . ((text . ,comment-text)))))
+    (error nil)))
+
+(defun org-asana--sync-new-comments ()
+  "Sync new comments from org to Asana."
+  (let ((task-id (org-entry-get nil "ASANA_TASK_ID"))
+        (new-comments (org-asana--extract-new-comments)))
+    (when (and task-id new-comments)
+      (dolist (comment new-comments)
+        (org-asana--add-comment-to-asana task-id comment))
+      ;; Clear the new comments section after syncing
+      (org-asana--clear-new-comments-section))))
+
+(defun org-asana--clear-new-comments-section ()
+  "Clear the New Comments section from current task."
+  (save-excursion
+    (org-back-to-heading t)
+    (let ((start (point))
+          (end (save-excursion (org-end-of-subtree t) (point))))
+      (goto-char start)
+      (when (re-search-forward "^\\*\\*\\* New Comments$" end t)
+        (let ((section-start (match-beginning 0))
+              (section-end (save-excursion
+                            (if (re-search-forward "^\\*\\*\\* " end t)
+                                (match-beginning 0)
+                              end))))
+          (delete-region section-start section-end))))))
 
 (defun org-asana--sync-from-asana ()
   "Sync tasks from Asana to org."
@@ -511,7 +646,8 @@
     (when org-task-data
       (let* ((task-id (plist-get org-task-data :task-id))
              (update-data (org-asana--build-asana-update-data org-task-data)))
-        (org-asana--send-task-update task-id update-data)))))
+        (org-asana--send-task-update task-id update-data)
+        (org-asana--sync-new-comments)))))
 
 (defun org-asana--sync-to-asana ()
   "Sync local changes to Asana."
@@ -532,9 +668,16 @@
              (not (string-empty-p timestamp-str)))
     (date-to-time timestamp-str)))
 
+(defun org-asana--format-asana-date (date-str)
+  "Format Asana DATE-STR for org-mode deadline."
+  (when (and date-str
+             (not (eq date-str :null))
+             (not (string-empty-p date-str)))
+    (format-time-string "<%Y-%m-%d %a>" (date-to-time date-str))))
+
 (defun org-asana--get-org-todo-state (completed)
   "Get org TODO state based on COMPLETED boolean."
-  (if (or (eq completed t) (eq completed :true)) "DONE" "TODO"))
+  (if (or (eq completed t) (eq completed :true) (eq completed 'true)) "DONE" "TODO"))
 
 (defun org-asana--get-asana-completed (todo-state)
   "Get Asana completed boolean from org TODO-STATE."
