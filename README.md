@@ -11,13 +11,17 @@ Advanced bidirectional sync between Emacs Org-mode and Asana with enhanced featu
 - **Works from anywhere**: Syncs to a designated file from any buffer
 - **Minimal configuration**: Just set your token and file path
 
-### New Advanced Features
+### Advanced Features
 - **Rate Limiting Protection**: Automatic retry with exponential backoff
 - **Pagination Support**: Handle workspaces with 100+ tasks
 - **Visual Task Faces**: Custom highlighting for priorities and due dates
 - **Org Agenda Integration**: Custom agenda views for Asana tasks
 - **Progress Indicators**: [x/y] indicators for projects and sections
 - **Capture Templates**: Create new Asana tasks using org-capture
+- **Complete Task Metadata**: Sync comments, attachments, activity history
+- **Extended Field Support**: Tags, followers, dependencies, custom fields, reactions
+- **Auto-collapse Views**: Property drawers and task headings collapse on open
+- **Robust Error Handling**: Graceful degradation with partial sync on errors
 
 ## Installation
 
@@ -39,11 +43,28 @@ Advanced bidirectional sync between Emacs Org-mode and Asana with enhanced featu
   :config
   (setq org-asana-token "YOUR_PERSONAL_ACCESS_TOKEN"
         org-asana-org-file "~/org/asana.org"
+        
+        ;; Core sync settings
         org-asana-conflict-resolution 'newest-wins  ; or 'asana-wins, 'local-wins
         org-asana-sync-tags t                       ; sync tags between org and Asana
         org-asana-sync-priority t                   ; sync priorities between org and Asana
+        
+        ;; Visual enhancements
         org-asana-show-progress-indicators t        ; show [x/y] progress
+        org-asana-auto-apply-faces t               ; color-code tasks by priority/due date
+        org-asana-collapse-on-open t                ; collapse drawers and headings
+        
+        ;; Metadata sync (disable if sync is too slow)
+        org-asana-fetch-metadata t                  ; fetch comments, attachments, history
+        org-asana-show-activity-history t           ; show activity timeline
+        
+        ;; Performance tuning
+        org-asana-max-retries 3                     ; set to 1 to disable retries
+        org-asana-debug nil                         ; enable for troubleshooting
+        
+        ;; Agenda settings
         org-asana-agenda-skip-completed t)          ; skip completed in agenda
+        
   ;; Enable optional features
   (org-asana-enable-agenda-integration)
   (org-asana-enable-capture-templates))
@@ -69,14 +90,47 @@ Advanced bidirectional sync between Emacs Org-mode and Asana with enhanced featu
 
 ### Configuration Options
 
+#### Required Settings
+
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `org-asana-token` | `nil` | **Required**: Your Asana Personal Access Token |
-| `org-asana-org-file` | `nil` | **Required**: Org file path for sync |
+| `org-asana-token` | `nil` | Your Asana Personal Access Token |
+| `org-asana-org-file` | `nil` | Org file path for sync |
+
+#### Core Sync Settings
+
+| Variable | Default | Description |
+|----------|---------|-------------|
 | `org-asana-conflict-resolution` | `'newest-wins` | Conflict resolution: `'newest-wins`, `'asana-wins`, or `'local-wins` |
 | `org-asana-sync-tags` | `t` | Whether to sync org tags with Asana tags |
 | `org-asana-sync-priority` | `t` | Whether to sync org priority with Asana priority |
+
+#### Visual Features
+
+| Variable | Default | Description |
+|----------|---------|-------------|
 | `org-asana-show-progress-indicators` | `t` | Show [x/y] progress indicators for projects/sections |
+| `org-asana-auto-apply-faces` | `t` | Apply color coding to tasks based on priority/due date |
+| `org-asana-collapse-on-open` | `t` | Collapse property drawers and task headings on open |
+
+#### Metadata Sync
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `org-asana-fetch-metadata` | `t` | Fetch comments, attachments, and activity history |
+| `org-asana-show-activity-history` | `t` | Show activity timeline in tasks |
+
+#### Performance Tuning
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `org-asana-max-retries` | `3` | Max retry attempts for API requests (set to 1 to disable) |
+| `org-asana-debug` | `nil` | Enable debug messages for troubleshooting |
+
+#### Other Settings
+
+| Variable | Default | Description |
+|----------|---------|-------------|
 | `org-asana-agenda-skip-completed` | `t` | Skip completed tasks in agenda views |
 | `org-asana-default-project` | `nil` | Default project GID for new tasks via capture |
 
@@ -115,12 +169,34 @@ After syncing, your org file will look like:
 *** Section Name [1/3]
 **** TODO [#A] Task 1 :work:urgent:
      DEADLINE: <2024-07-20>
+     SCHEDULED: <2024-07-18>
      :PROPERTIES:
      :asana-id: 123456789
      :asana-modified: 2024-07-15T10:00:00.000Z
+     :permalink-url: https://app.asana.com/0/project/123456789
+     :followers: John Doe, Jane Smith
+     :custom-field-Status: In Progress
+     :likes: 3
      :END:
      
      Task notes and description here...
+     
+***** Comments
+- John Doe (2024-07-15 14:30): This looks good!
+  :PROPERTIES:
+  :ASANA-COMMENT-GID: 987654321
+  :END:
+  
+***** Attachments
+- [[https://example.com/file.pdf][Design Document]]
+  :PROPERTIES:
+  :ASANA-ATTACHMENT-GID: 456789123
+  :END:
+  
+***** Activity History
+- Jane Smith (2024-07-15 10:00): created task
+- John Doe (2024-07-15 14:30): added comment
+- System (2024-07-15 15:00): set due date: 2024-07-20
      
 **** DONE [#B] Task 2 :project:review:
 **** TODO Task 3
@@ -207,11 +283,19 @@ Create new Asana tasks directly from Emacs:
 | Heading | Task name | Bidirectional sync |
 | TODO/DONE | Completed status | Bidirectional sync |
 | DEADLINE | Due date | Bidirectional sync |
+| SCHEDULED | Start date | Bidirectional sync |
 | [#A]/[#B]/[#C] | Priority (high/medium/low) | Optional, bidirectional |
 | :tags: | Tags | Optional, bidirectional |
 | Body text | Notes | Bidirectional sync |
 | :asana-id: | Task GID | Auto-managed |
 | :asana-modified: | Last modified | Auto-managed |
+| :permalink-url: | Task URL | Read-only from Asana |
+| :followers: | Task followers | Read-only from Asana |
+| :custom-field-*: | Custom fields | Read-only from Asana |
+| :likes:/:hearts: | Reactions | Read-only from Asana |
+| Comments section | Comments/Stories | Read-only from Asana |
+| Attachments section | File attachments | Read-only from Asana |
+| Activity History | Activity timeline | Read-only from Asana |
 
 ### Priority Mapping
 
@@ -241,9 +325,9 @@ When the same task is modified in both org and Asana:
 
 - Only syncs tasks assigned to you
 - Tags must exist in Asana workspace before syncing
-- Custom fields and attachments are not synced
 - Subtasks are not currently supported
-- Comments are not synced
+- Comments, attachments, and activity history are read-only (cannot sync from org to Asana)
+- Custom fields are displayed but cannot be edited in org
 
 ## Troubleshooting
 
@@ -264,6 +348,24 @@ org-asana--rate-limit-reset      ; Check reset time
 ```elisp
 ;; Re-enable agenda integration
 M-x org-asana-enable-agenda-integration
+```
+
+### Sync Failures with Large Task Lists
+```elisp
+;; Reduce retries to avoid cascading failures
+(setq org-asana-max-retries 1)
+
+;; Or disable metadata fetching for faster sync
+(setq org-asana-fetch-metadata nil)
+
+;; Enable debug mode to see detailed errors
+(setq org-asana-debug t)
+```
+
+### Property Drawers Not Collapsing
+```elisp
+;; Ensure collapse feature is enabled
+(setq org-asana-collapse-on-open t)
 ```
 
 ## Contributing

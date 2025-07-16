@@ -259,7 +259,8 @@
 
 (defcustom org-asana-fetch-metadata t
   "Whether to fetch comments and attachments for tasks.
-Setting this to nil can speed up sync significantly if you don't need metadata."
+Setting this to nil can speed up sync significantly if you don't need metadata.
+If you're experiencing repeated retry errors, try setting this to nil."
   :type 'boolean
   :group 'org-asana)
 
@@ -267,6 +268,18 @@ Setting this to nil can speed up sync significantly if you don't need metadata."
   "Whether to show activity history (system stories) for tasks.
 This includes events like task creation, assignments, due date changes, etc."
   :type 'boolean
+  :group 'org-asana)
+
+(defcustom org-asana-debug nil
+  "Enable debug messages for troubleshooting sync issues."
+  :type 'boolean
+  :group 'org-asana)
+
+(defcustom org-asana-max-retries 3
+  "Maximum number of retry attempts for API requests.
+Reduce this value if experiencing sync issues with large task lists.
+Set to 1 to disable retries entirely."
+  :type 'integer
   :group 'org-asana)
 
 ;;; Constants
@@ -321,7 +334,8 @@ This includes events like task creation, assignments, due date changes, etc."
 (defun org-asana--make-batch-request (actions)
   "Make batch API request with ACTIONS (max 10 per request)."
   (let ((batch-data `((data . ((actions . ,actions))))))
-    (org-asana--make-request "POST" "/batch" batch-data)))
+    ;; Use single attempt for batch requests to avoid repeated failures
+    (org-asana--make-request-with-retry "POST" "/batch" batch-data 1)))
 
 (defun org-asana--build-task-data-actions (task-ids)
   "Build batch actions for fetching comments and attachments for TASK-IDS."
@@ -357,7 +371,9 @@ This includes events like task creation, assignments, due date changes, etc."
 
 (defun org-asana--fetch-task-data-batch (task-ids)
   "Fetch comments and attachments for TASK-IDS using batch API."
-  (let ((all-results '()))
+  (let ((all-results '())
+        (total-tasks (length task-ids))
+        (processed 0))
     ;; Process in batches of 5 tasks (10 actions per batch: 5 comments + 5 attachments)
     (while task-ids
       (let* ((batch-task-ids (seq-take task-ids 5))
@@ -367,12 +383,19 @@ This includes events like task creation, assignments, due date changes, etc."
             (let* ((batch-response (org-asana--make-batch-request actions))
                    (responses (alist-get 'data batch-response))
                    (batch-results (org-asana--process-batch-responses responses batch-task-ids)))
-              (setq all-results (append all-results batch-results)))
+              (setq all-results (append all-results batch-results))
+              (setq processed (+ processed (length batch-task-ids)))
+              (message "Fetched metadata for %d/%d tasks" processed total-tasks))
           (error
            ;; If batch request fails, create empty results for this batch
            (dolist (task-id batch-task-ids)
              (push (cons task-id (cons nil nil)) all-results))
-           (message "Skipping metadata for batch due to error: %s" (error-message-string err))))
+           (setq processed (+ processed (length batch-task-ids)))
+           (if org-asana-debug
+               (message "DEBUG: Batch metadata fetch failed (%d/%d): %s" 
+                       processed total-tasks (error-message-string err))
+             (message "WARNING: Some metadata could not be fetched (%d/%d tasks processed)" 
+                     processed total-tasks))))
         (setq task-ids remaining-task-ids)))
     all-results))
 
@@ -407,7 +430,7 @@ This includes events like task creation, assignments, due date changes, etc."
 (defun org-asana--make-request-with-retry (method endpoint &optional data max-retries)
   "Make request with retry logic and rate limiting."
   (let ((attempt 0)
-        (max-attempts (or max-retries 3))
+        (max-attempts (or max-retries org-asana-max-retries))
         (result nil)
         (success nil))
     (while (and (< attempt max-attempts) (not success))
@@ -421,6 +444,9 @@ This includes events like task creation, assignments, due date changes, etc."
          (if (>= attempt max-attempts)
              (signal (car err) (cdr err))
            (let ((delay (org-asana--calculate-retry-delay attempt)))
+             (when org-asana-debug
+               (message "DEBUG: Request to %s failed (attempt %d/%d): %s" 
+                       endpoint attempt max-attempts (error-message-string err)))
              (message "Request failed, retrying in %d seconds..." delay)
              (sleep-for delay))))))
     result))
@@ -460,7 +486,11 @@ This includes events like task creation, assignments, due date changes, etc."
     (cond
      ((= status 429) (org-asana--handle-rate-limit))
      ((org-asana--status-ok-p status) (org-asana--parse-json-response buffer))
-     (t (error "Asana API error: HTTP %d" status)))))
+     (t 
+      (let ((error-body (ignore-errors (org-asana--parse-json-response buffer))))
+        (if (and error-body (alist-get 'errors error-body))
+            (error "Asana API error: %s" (alist-get 'message (car (alist-get 'errors error-body))))
+          (error "Asana API error: HTTP %d" status)))))))
 
 (defun org-asana--handle-rate-limit ()
   "Handle rate limit error."
@@ -512,7 +542,21 @@ This includes events like task creation, assignments, due date changes, etc."
   (with-current-buffer buffer
     (org-asana--perform-sync-operations)
     (org-asana--apply-visual-enhancements)
+    ;; Collapse all property drawers and task headings
+    (org-asana--collapse-all-drawers)
+    (org-asana--collapse-all-tasks)
     (save-buffer)))
+
+(defun org-asana--collapse-all-drawers ()
+  "Collapse all property drawers in the buffer."
+  (org-cycle-hide-drawers 'all))
+
+(defun org-asana--collapse-all-tasks ()
+  "Collapse all task headings (level 4 and below)."
+  (save-excursion
+    (goto-char (point-min))
+    (while (re-search-forward "^\\*\\{4,\\} " nil t)
+      (org-cycle))))
 
 (defun org-asana--perform-sync-operations ()
   "Perform core sync operations in order."
@@ -535,10 +579,19 @@ This includes events like task creation, assignments, due date changes, etc."
   "Sync tasks between Org and Asana."
   (interactive)
   (org-asana--validate-configuration)
-  (let ((buffer (find-file-noselect org-asana-org-file)))
+  (let ((buffer (find-file-noselect org-asana-org-file))
+        (sync-start-time (current-time)))
     (org-asana--initialize-buffer buffer)
-    (org-asana--orchestrate-sync buffer)
-    (message "Sync complete")))
+    (condition-case err
+        (progn
+          (org-asana--orchestrate-sync buffer)
+          (let ((sync-time (float-time (time-subtract (current-time) sync-start-time))))
+            (message "Sync complete in %.1f seconds" sync-time)))
+      (error
+       (if org-asana-debug
+           (message "Sync failed: %s" (error-message-string err))
+         (message "Sync failed. Enable `org-asana-debug' for details"))
+       (signal (car err) (cdr err))))))
 
 ;;; Internal Sync Functions
 
@@ -664,16 +717,36 @@ This includes events like task creation, assignments, due date changes, etc."
   "Fetch all pages from ENDPOINT."
   (let ((all-data '())
         (next-page endpoint)
-        (page-count 0))
-    (while next-page
-      (let* ((response (org-asana--make-request "GET" next-page))
-             (data (alist-get 'data response))
-             (next-page-info (alist-get 'next_page response)))
-        (setq all-data (append all-data data))
-        (setq page-count (1+ page-count))
-        (message "Fetched page %d (%d items so far)" page-count (length all-data))
-        (setq next-page (when next-page-info
-                         (alist-get 'path next-page-info)))))
+        (page-count 0)
+        (error-count 0)
+        (max-errors 3))
+    (while (and next-page (< error-count max-errors))
+      (condition-case err
+          (let* ((response (org-asana--make-request-with-retry "GET" next-page nil 1))
+                 (data (alist-get 'data response))
+                 (next-page-info (alist-get 'next_page response)))
+            (when data
+              (setq all-data (append all-data data)))
+            (setq page-count (1+ page-count))
+            (message "Fetched page %d (%d items so far)" page-count (length all-data))
+            (setq next-page (when next-page-info
+                             (alist-get 'path next-page-info)))
+            ;; Reset error count on success
+            (setq error-count 0))
+        (error
+         (setq error-count (1+ error-count))
+         (when org-asana-debug
+           (message "Error fetching page %d: %s" (1+ page-count) (error-message-string err)))
+         (if (>= error-count max-errors)
+             (progn
+               (message "WARNING: Stopped pagination after %d consecutive errors. Fetched %d items total." 
+                       max-errors (length all-data))
+               (setq next-page nil))
+           (message "Error on page %d, continuing... (%d/%d errors)" 
+                   (1+ page-count) error-count max-errors)))))
+    (when (> error-count 0)
+      (message "Completed with %d items fetched despite %d error(s)" 
+              (length all-data) error-count))
     all-data))
 
 (defun org-asana--fetch-incomplete-tasks (user-gid workspace-gid)
@@ -837,7 +910,10 @@ This includes events like task creation, assignments, due date changes, etc."
           :modified-at (alist-get 'modified_at task)
           :priority (alist-get 'priority task)
           :tags (alist-get 'tags task)
-          :permalink-url (alist-get 'permalink_url task)
+          :permalink-url (let ((url (alist-get 'permalink_url task)))
+                           (if (and url (string-prefix-p "/" url))
+                               (concat "https://app.asana.com" url)
+                             url))
           :followers (alist-get 'followers task)
           :parent (alist-get 'parent task)
           :custom-fields (alist-get 'custom_fields task)
@@ -870,8 +946,12 @@ This includes events like task creation, assignments, due date changes, etc."
 
 (defun org-asana--update-task-heading (task-fields)
   "Update task heading from TASK-FIELDS."
-  (let ((task-name (plist-get task-fields :task-name)))
-    (org-asana--update-heading task-name)))
+  (let* ((task-name (plist-get task-fields :task-name))
+         (permalink-url (plist-get task-fields :permalink-url))
+         (linked-name (if (and permalink-url (not (string-empty-p permalink-url)))
+                         (format "[[%s][%s]]" permalink-url task-name)
+                       task-name)))
+    (org-asana--update-heading linked-name)))
 
 (defun org-asana--update-task-deadline (task-fields)
   "Update task deadline from TASK-FIELDS."
@@ -1140,9 +1220,7 @@ This includes events like task creation, assignments, due date changes, etc."
           (goto-char comments-start)
           ;; Look for comments without GID properties
           (while (re-search-forward "^- \\(.+?\\): \\(.+\\)$" comments-end t)
-            (let ((author (match-string 1))
-                  (text (match-string 2))
-                  (pos (point)))
+            (let ((text (match-string 2)))
               ;; Check if this comment has a GID property
               (save-excursion
                 (forward-line)
@@ -1710,6 +1788,11 @@ Uses org-map-entries for robust subtree boundary handling."
      "* TODO %^{Task Title}\n:PROPERTIES:\n:asana-id: new\n:asana-project: %(org-asana--select-project)\n:END:\nDEADLINE: %^t\n\n%^{Task Notes}\n\n%?"
      :empty-lines-after 1))
   "Capture templates for creating new Asana tasks.")
+
+(defun org-asana-setup-capture ()
+  "Set up org-capture templates for Asana tasks."
+  (setq org-capture-templates
+        (append org-capture-templates org-asana-capture-templates)))
 
 (defun org-asana--select-project ()
   "Select an Asana project for new task."
