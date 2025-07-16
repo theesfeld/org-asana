@@ -94,6 +94,59 @@
     ("Content-Type" . "application/json")
     ("Accept" . "application/json")))
 
+(defun org-asana--make-batch-request (actions)
+  "Make batch API request with ACTIONS (max 10 per request)."
+  (let ((batch-data `((data . ((actions . ,actions))))))
+    (org-asana--make-request "POST" "/batch" batch-data)))
+
+(defun org-asana--build-task-data-actions (task-ids)
+  "Build batch actions for fetching comments and attachments for TASK-IDS."
+  (let ((actions '()))
+    (dolist (task-id task-ids)
+      (push `((method . "GET")
+              (relative_path . ,(format "/tasks/%s/stories?opt_fields=text,created_at,created_by.name,type" task-id))
+              (data . nil))
+            actions)
+      (push `((method . "GET")
+              (relative_path . ,(format "/tasks/%s/attachments?opt_fields=name,download_url,view_url" task-id))
+              (data . nil))
+            actions))
+    (nreverse actions)))
+
+(defun org-asana--process-batch-responses (responses task-ids)
+  "Process batch RESPONSES and return alist of task-id to (comments . attachments)."
+  (let ((results '())
+        (response-index 0))
+    (dolist (task-id task-ids)
+      (let* ((comments-response (nth response-index responses))
+             (attachments-response (nth (1+ response-index) responses))
+             (comments (when (and comments-response
+                                 (alist-get 'data comments-response))
+                        (alist-get 'data comments-response)))
+             (attachments (when (and attachments-response
+                                    (alist-get 'data attachments-response))
+                           (alist-get 'data attachments-response))))
+        (push (cons task-id (cons comments attachments)) results)
+        (setq response-index (+ response-index 2))))
+    (nreverse results)))
+
+(defun org-asana--fetch-task-data-batch (task-ids)
+  "Fetch comments and attachments for TASK-IDS using batch API."
+  (let ((all-results '()))
+    ;; Process in batches of 5 tasks (10 actions per batch: 5 comments + 5 attachments)
+    (while task-ids
+      (let* ((batch-task-ids (seq-take task-ids 5))
+             (remaining-task-ids (seq-drop task-ids 5))
+             (actions (org-asana--build-task-data-actions batch-task-ids)))
+        (condition-case nil
+            (let* ((batch-response (org-asana--make-batch-request actions))
+                   (responses (alist-get 'data batch-response))
+                   (batch-results (org-asana--process-batch-responses responses batch-task-ids)))
+              (setq all-results (append all-results batch-results)))
+          (error nil))
+        (setq task-ids remaining-task-ids)))
+    all-results))
+
 (defun org-asana--encode-json-data (data)
   "Encode DATA as JSON string with error handling."
   (condition-case nil
@@ -301,33 +354,24 @@
     (list user-gid workspace-gid)))
 
 (defun org-asana--fetch-incomplete-tasks (user-gid workspace-gid)
-  "Fetch incomplete tasks assigned to USER-GID from WORKSPACE-GID."
+  "Fetch incomplete tasks from WORKSPACE-GID."
   (let ((opt-fields "gid,name,notes,completed,due_on,modified_at,priority,tags.name,memberships.project.name,memberships.section.name,permalink_url"))
-    (alist-get 'data
-               (org-asana--make-request
-                "GET"
-                (format "/workspaces/%s/tasks/search?assignee.any=%s&completed=false&limit=100&opt_fields=%s"
-                        workspace-gid user-gid opt-fields)))))
+    (condition-case nil
+        ;; Try to get all incomplete tasks in workspace (not just assigned)
+        (alist-get 'data
+                   (org-asana--make-request
+                    "GET"
+                    (format "/workspaces/%s/tasks/search?completed=false&limit=100&opt_fields=%s"
+                            workspace-gid opt-fields)))
+      (error
+       ;; If search API fails, fall back to assigned tasks only
+       (message "Search API failed, falling back to assigned tasks only")
+       (alist-get 'data
+                  (org-asana--make-request
+                   "GET"
+                   (format "/workspaces/%s/tasks/search?assignee.any=%s&completed=false&limit=100&opt_fields=%s"
+                           workspace-gid user-gid opt-fields)))))))
 
-(defun org-asana--fetch-task-comments (task-id)
-  "Fetch comments for TASK-ID from Asana."
-  (condition-case nil
-      (alist-get 'data
-                 (org-asana--make-request
-                  "GET"
-                  (format "/tasks/%s/stories?opt_fields=text,created_at,created_by.name,type"
-                          task-id)))
-    (error nil)))
-
-(defun org-asana--fetch-task-attachments (task-id)
-  "Fetch attachments for TASK-ID from Asana."
-  (condition-case nil
-      (alist-get 'data
-                 (org-asana--make-request
-                  "GET"
-                  (format "/tasks/%s/attachments?opt_fields=name,download_url,view_url"
-                          task-id)))
-    (error nil)))
 
 (defun org-asana--format-comments (comments)
   "Format COMMENTS list for org-mode display."
@@ -347,11 +391,10 @@
                            "Unknown time")
                          text)
                   formatted-comments)))))
-    (concat "*** Comments\n"
+    (concat "***** Comments\n"
             (if formatted-comments
                 (concat (string-join (nreverse formatted-comments) "\n") "\n")
-              "")
-            "\n")))
+              ""))))
 
 (defun org-asana--format-attachments (attachments)
   "Format ATTACHMENTS list for org-mode display."
@@ -366,14 +409,13 @@
                          (or view-url download-url "#")
                          name)
                   formatted-attachments)))))
-    (concat "*** Attachments\n"
+    (concat "***** Attachments\n"
             (if formatted-attachments
                 (concat (string-join (nreverse formatted-attachments) "\n") "\n")
-              "")
-            "\n")))
+              ""))))
 
-(defun org-asana--process-project-sections (project-entry section-start)
-  "Process PROJECT-ENTRY sections under SECTION-START."
+(defun org-asana--process-project-sections (project-entry section-start batch-data)
+  "Process PROJECT-ENTRY sections under SECTION-START using BATCH-DATA."
   (let* ((project-name (car project-entry))
          (sections (cdr project-entry))
          (project-pos (org-asana--find-or-create-heading
@@ -390,17 +432,17 @@
         (goto-char section-pos)
 
         (dolist (task tasks)
-          (org-asana--update-or-create-task task section-pos))))))
+          (org-asana--update-or-create-task task section-pos batch-data))))))
 
-(defun org-asana--process-task-tree (task-tree)
-  "Process TASK-TREE and update Active Projects section."
+(defun org-asana--process-task-tree (task-tree batch-data)
+  "Process TASK-TREE using BATCH-DATA and update Active Projects section."
   (save-excursion
     (goto-char (point-min))
     (re-search-forward "^\\* Active Projects$" nil t)
     (let ((section-start (point)))
 
       (dolist (project-entry task-tree)
-        (org-asana--process-project-sections project-entry section-start))
+        (org-asana--process-project-sections project-entry section-start batch-data))
 
       (org-asana--update-statistics))))
 
@@ -410,9 +452,12 @@
     (dolist (task-info done-tasks)
       (org-asana--move-task-to-completed task-info))))
 
-(defun org-asana--extract-task-fields (task)
-  "Extract and organize fields from TASK."
-  (let ((task-id (alist-get 'gid task)))
+(defun org-asana--extract-task-fields (task batch-data)
+  "Extract and organize fields from TASK using BATCH-DATA."
+  (let* ((task-id (alist-get 'gid task))
+         (task-data (alist-get task-id batch-data))
+         (comments (car task-data))
+         (attachments (cdr task-data)))
     (list :task-id task-id
           :task-name (alist-get 'name task)
           :completed (alist-get 'completed task)
@@ -422,8 +467,8 @@
           :priority (alist-get 'priority task)
           :tags (alist-get 'tags task)
           :permalink-url (alist-get 'permalink_url task)
-          :comments (org-asana--fetch-task-comments task-id)
-          :attachments (org-asana--fetch-task-attachments task-id))))
+          :comments comments
+          :attachments attachments)))
 
 (defun org-asana--apply-asana-updates (task-fields)
   "Apply TASK-FIELDS updates to current org entry."
@@ -494,7 +539,8 @@
         (unless (bolp) (insert "\n"))
         (insert (org-asana--format-new-task-heading task-fields))
         (org-asana--set-task-properties task-fields)
-        (org-asana--add-task-notes task-fields)))))
+        (org-asana--add-task-notes task-fields)
+        (insert "\n")))))
 
 (defun org-asana--set-task-properties (task-fields)
   "Set properties for task from TASK-FIELDS."
@@ -521,7 +567,11 @@
         (attachments (plist-get task-fields :attachments)))
     (org-end-of-meta-data t)
     (org-asana--insert-task-notes notes)
+    (when (or attachments comments)
+      (unless (bolp) (insert "\n")))
     (insert (org-asana--format-attachments attachments))
+    (when (and attachments comments)
+      (insert "\n"))
     (insert (org-asana--format-comments comments))))
 
 (defun org-asana--extract-new-comments ()
@@ -591,8 +641,10 @@
          (user-gid (org-asana--get-user-gid user-workspace-info))
          (workspace-gid (org-asana--get-workspace-gid user-workspace-info))
          (tasks (org-asana--fetch-incomplete-tasks user-gid workspace-gid))
+         (task-ids (mapcar (lambda (task) (alist-get 'gid task)) tasks))
+         (batch-data (org-asana--fetch-task-data-batch task-ids))
          (task-tree (org-asana--build-task-tree tasks)))
-    (org-asana--process-task-tree task-tree)))
+    (org-asana--process-task-tree task-tree batch-data)))
 
 (defun org-asana--find-active-tasks-region ()
   "Find the start and end positions of Active Projects section."
@@ -806,7 +858,9 @@ Returns :org or :asana depending on resolution strategy."
   (save-excursion
     (goto-char parent-pos)
     (let* ((stars (make-string level ?*))
-           (regexp (format "^%s %s$" stars (regexp-quote heading)))
+           (stats-cookie (if (or (= level 2) (= level 3)) " [/]" ""))
+           (heading-with-stats (concat heading stats-cookie))
+           (regexp (format "^%s %s\\(?: \\[\\d+/\\d+\\]\\)?$" stars (regexp-quote heading)))
            (end-pos (save-excursion
                      (when (org-at-heading-p)
                        (org-end-of-subtree t))
@@ -816,12 +870,12 @@ Returns :org or :asana depending on resolution strategy."
           (point)
         (goto-char end-pos)
         (unless (bolp) (insert "\n"))
-        (insert (format "%s %s\n" stars heading))
+        (insert (format "%s %s\n" stars heading-with-stats))
         (point)))))
 
-(defun org-asana--update-or-create-task (task parent-pos)
-  "Update or create TASK under PARENT-POS."
-  (let* ((task-fields (org-asana--extract-task-fields task))
+(defun org-asana--update-or-create-task (task parent-pos batch-data)
+  "Update or create TASK under PARENT-POS using BATCH-DATA."
+  (let* ((task-fields (org-asana--extract-task-fields task batch-data))
          (task-id (plist-get task-fields :task-id))
          (existing-pos (org-asana--find-task-by-id task-id parent-pos)))
 
