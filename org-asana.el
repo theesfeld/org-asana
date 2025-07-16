@@ -717,7 +717,11 @@ Returns :org or :asana depending on resolution strategy."
     (error "Asana token not configured. Run `org-asana-setup'"))
 
   (let ((buffer (if org-asana-org-file
-                   (find-file-noselect org-asana-org-file)
+                   (let ((buf (find-file-noselect org-asana-org-file)))
+                     (with-current-buffer buf
+                       (unless (derived-mode-p 'org-mode)
+                         (org-mode)))
+                     buf)
                  (current-buffer))))
 
     (with-current-buffer buffer
