@@ -331,8 +331,8 @@
 
 (defun org-asana--format-comments (comments)
   "Format COMMENTS list for org-mode display."
-  (when comments
-    (let ((formatted-comments '()))
+  (let ((formatted-comments '()))
+    (when comments
       (dolist (comment comments)
         (let ((text (alist-get 'text comment))
               (created-at (alist-get 'created_at comment))
@@ -346,16 +346,17 @@
                                                (org-asana--parse-asana-timestamp created-at))
                            "Unknown time")
                          text)
-                  formatted-comments))))
-      (when formatted-comments
-        (concat "\n*** Comments\n"
-                (string-join (nreverse formatted-comments) "\n")
-                "\n")))))
+                  formatted-comments)))))
+    (concat "*** Comments\n"
+            (if formatted-comments
+                (concat (string-join (nreverse formatted-comments) "\n") "\n")
+              "")
+            "\n")))
 
 (defun org-asana--format-attachments (attachments)
   "Format ATTACHMENTS list for org-mode display."
-  (when attachments
-    (let ((formatted-attachments '()))
+  (let ((formatted-attachments '()))
+    (when attachments
       (dolist (attachment attachments)
         (let ((name (alist-get 'name attachment))
               (download-url (alist-get 'download_url attachment))
@@ -364,11 +365,12 @@
             (push (format "- [[%s][%s]]"
                          (or view-url download-url "#")
                          name)
-                  formatted-attachments))))
-      (when formatted-attachments
-        (concat "*** Attachments\n"
-                (string-join (nreverse formatted-attachments) "\n")
-                "\n")))))
+                  formatted-attachments)))))
+    (concat "*** Attachments\n"
+            (if formatted-attachments
+                (concat (string-join (nreverse formatted-attachments) "\n") "\n")
+              "")
+            "\n")))
 
 (defun org-asana--process-project-sections (project-entry section-start)
   "Process PROJECT-ENTRY sections under SECTION-START."
@@ -470,9 +472,9 @@
                         (org-asana--format-org-priority priority)))
          (tags-str (when (and org-asana-sync-tags tags)
                     (org-asana--format-org-tags tags)))
-         (linked-name (if permalink-url
-                         (format "[[%s][%s]]" permalink-url (or task-name ""))
-                       (or task-name ""))))
+         (linked-name (if (and permalink-url (not (string-empty-p permalink-url)))
+                         (format "[[%s][%s]]" permalink-url (or task-name "Untitled Task"))
+                       (or task-name "Untitled Task"))))
 
     (format "**** %s %s%s%s\n"
             todo-state
@@ -519,10 +521,8 @@
         (attachments (plist-get task-fields :attachments)))
     (org-end-of-meta-data t)
     (org-asana--insert-task-notes notes)
-    (when attachments
-      (insert (org-asana--format-attachments attachments)))
-    (when comments
-      (insert (org-asana--format-comments comments)))))
+    (insert (org-asana--format-attachments attachments))
+    (insert (org-asana--format-comments comments))))
 
 (defun org-asana--extract-new-comments ()
   "Extract new comments from current org task."
