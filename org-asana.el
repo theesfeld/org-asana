@@ -1358,7 +1358,7 @@ Set to 1 to disable retries entirely."
 
     `((data . ((name . ,heading)
               (notes . ,body)
-              (completed . ,completed)
+              (completed . ,(if completed t :false))
               ,@(when due-date `((due_on . ,due-date)))
               ,@(when start-date `((start_on . ,start-date)))
               ,@(when asana-priority `((priority . ,asana-priority))))))))
