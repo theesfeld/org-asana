@@ -657,18 +657,32 @@ Returns :org or :asana depending on resolution strategy."
         (org-asana--update-existing-task task-fields existing-pos)
       (org-asana--create-new-task task-fields parent-pos))))
 
+(defun org-asana--goto-heading-from-pos (pos)
+  "Go to heading at or before POS."
+  (goto-char pos)
+  (unless (org-at-heading-p)
+    (org-back-to-heading t)))
+
+(defun org-asana--get-subtree-end-marker (pos)
+  "Get marker for end of subtree at POS."
+  (save-excursion
+    (org-asana--goto-heading-from-pos pos)
+    (copy-marker (save-excursion
+                   (org-end-of-subtree t)
+                   (point)))))
+
 (defun org-asana--find-task-by-id (task-id parent-pos)
   "Find task with TASK-ID after PARENT-POS."
   (save-excursion
     (goto-char parent-pos)
-    (let ((end-pos (save-excursion
-                     (org-end-of-subtree t)
-                     (point))))
-      (when (re-search-forward
-             (format "^[ \t]*:ASANA_TASK_ID:[ \t]+%s" task-id)
-             end-pos t)
-        (org-back-to-heading t)
-        (point)))))
+    (let ((end-marker (org-asana--get-subtree-end-marker parent-pos)))
+      (unwind-protect
+          (when (re-search-forward
+                 (format "^[ \t]*:ASANA_TASK_ID:[ \t]+%s" task-id)
+                 end-marker t)
+            (org-back-to-heading t)
+            (point))
+        (set-marker end-marker nil)))))
 
 (defun org-asana--update-heading (new-text)
   "Update current heading text to NEW-TEXT."
