@@ -354,23 +354,13 @@
     (list user-gid workspace-gid)))
 
 (defun org-asana--fetch-incomplete-tasks (user-gid workspace-gid)
-  "Fetch incomplete tasks from WORKSPACE-GID."
+  "Fetch incomplete tasks assigned to USER-GID from WORKSPACE-GID."
   (let ((opt-fields "gid,name,notes,completed,due_on,modified_at,priority,tags.name,memberships.project.name,memberships.section.name,permalink_url"))
-    (condition-case nil
-        ;; Try to get all incomplete tasks in workspace (not just assigned)
-        (alist-get 'data
-                   (org-asana--make-request
-                    "GET"
-                    (format "/workspaces/%s/tasks/search?completed=false&limit=100&opt_fields=%s"
-                            workspace-gid opt-fields)))
-      (error
-       ;; If search API fails, fall back to assigned tasks only
-       (message "Search API failed, falling back to assigned tasks only")
-       (alist-get 'data
-                  (org-asana--make-request
-                   "GET"
-                   (format "/workspaces/%s/tasks/search?assignee.any=%s&completed=false&limit=100&opt_fields=%s"
-                           workspace-gid user-gid opt-fields)))))))
+    (alist-get 'data
+               (org-asana--make-request
+                "GET"
+                (format "/workspaces/%s/tasks/search?assignee.any=%s&completed=false&limit=100&opt_fields=%s"
+                        workspace-gid user-gid opt-fields)))))
 
 
 (defun org-asana--format-comments (comments)
@@ -418,21 +408,30 @@
   "Process PROJECT-ENTRY sections under SECTION-START using BATCH-DATA."
   (let* ((project-name (car project-entry))
          (sections (cdr project-entry))
-         (project-pos (org-asana--find-or-create-heading
-                       2 project-name section-start)))
-
-    (goto-char project-pos)
-
+         ;; Only create project heading if it has sections with tasks
+         (has-tasks nil))
+    
+    ;; Check if any section has tasks
     (dolist (section-entry sections)
-      (let* ((section-name (car section-entry))
-             (tasks (cdr section-entry))
-             (section-pos (org-asana--find-or-create-heading
-                           3 section-name project-pos)))
-
-        (goto-char section-pos)
-
-        (dolist (task tasks)
-          (org-asana--update-or-create-task task section-pos batch-data))))))
+      (when (cdr section-entry)
+        (setq has-tasks t)))
+    
+    (when has-tasks
+      (let ((project-pos (org-asana--find-or-create-heading
+                         2 project-name section-start)))
+        (goto-char project-pos)
+        
+        (dolist (section-entry sections)
+          (let* ((section-name (car section-entry))
+                 (tasks (cdr section-entry)))
+            ;; Only create section if it has tasks
+            (when tasks
+              (let ((section-pos (org-asana--find-or-create-heading
+                                 3 section-name project-pos)))
+                (goto-char section-pos)
+                
+                (dolist (task tasks)
+                  (org-asana--update-or-create-task task section-pos batch-data))))))))))
 
 (defun org-asana--process-task-tree (task-tree batch-data)
   "Process TASK-TREE using BATCH-DATA and update Active Projects section."
@@ -441,9 +440,14 @@
     (re-search-forward "^\\* Active Projects$" nil t)
     (let ((section-start (point)))
 
+      ;; Only process projects that have tasks
       (dolist (project-entry task-tree)
-        (org-asana--process-project-sections project-entry section-start batch-data))
+        (when (cdr project-entry) ; Only if project has sections
+          (org-asana--process-project-sections project-entry section-start batch-data)))
 
+      ;; Clean up any empty sections/projects from previous syncs
+      (org-asana--cleanup-empty-sections)
+      
       (org-asana--update-statistics))))
 
 (defun org-asana--sync-done-tasks ()
@@ -962,6 +966,43 @@ Uses org-map-entries for robust subtree boundary handling."
     (goto-char (point-min))
     (when (re-search-forward "^\\* Active Projects$" nil t)
       (org-update-statistics-cookies t))))
+
+(defun org-asana--cleanup-empty-sections ()
+  "Remove empty sections and projects in Active Projects."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward "^\\* Active Projects$" nil t)
+      (let ((active-end (save-excursion
+                         (if (re-search-forward "^\\* COMPLETED$" nil t)
+                             (match-beginning 0)
+                           (point-max)))))
+        ;; Clean up empty sections first
+        (goto-char (point))
+        (while (re-search-forward "^\\*\\*\\* " active-end t)
+          (let ((section-start (match-beginning 0))
+                (has-tasks nil))
+            (save-excursion
+              (org-end-of-subtree t)
+              (let ((section-end (point)))
+                (goto-char section-start)
+                (setq has-tasks (re-search-forward "^\\*\\*\\*\\* " section-end t))))
+            (unless has-tasks
+              (goto-char section-start)
+              (org-cut-subtree))))
+        
+        ;; Then clean up empty projects
+        (goto-char (point))
+        (while (re-search-forward "^\\*\\* " active-end t)
+          (let ((project-start (match-beginning 0))
+                (has-sections nil))
+            (save-excursion
+              (org-end-of-subtree t)
+              (let ((project-end (point)))
+                (goto-char project-start)
+                (setq has-sections (re-search-forward "^\\*\\*\\* " project-end t))))
+            (unless has-sections
+              (goto-char project-start)
+              (org-cut-subtree))))))))
 
 (provide 'org-asana)
 ;;; org-asana.el ends here
