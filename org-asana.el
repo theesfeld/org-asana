@@ -676,15 +676,15 @@ Returns :org or :asana depending on resolution strategy."
     (when (looking-at org-complex-heading-regexp)
       (let ((todo (match-string 2))
             (priority (match-string 3))
-            (tags (match-string 5)))
+            (tags (match-string 5))
+            (level (org-current-level)))
         (beginning-of-line)
         (delete-region (point) (line-end-position))
-        (insert (org-make-heading-string
+        (insert (make-string level ?*) " "
+                (or todo "") (if todo " " "")
+                (or priority "") (if priority " " "")
                 new-text
-                (org-current-level)
-                todo
-                priority
-                tags))))))
+                (or tags ""))))))
 
 (defun org-asana--get-task-body ()
   "Get the body text of current task."
