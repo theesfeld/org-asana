@@ -465,7 +465,7 @@
     (format "**** %s %s%s%s\n"
             todo-state
             (or priority-str "")
-            task-name
+            (or task-name "")
             (or tags-str ""))))
 
 (defun org-asana--create-new-task (task-fields parent-pos)
@@ -505,15 +505,11 @@
     (when (and notes (not (string-empty-p notes)))
       (insert notes "\n"))
     (when permalink-url
-      (insert (format "\n[[%s][View in Asana]]\n" permalink-url)))
+      (insert (format "[[%s][View in Asana]]\n" permalink-url)))
     (when attachments
       (insert (org-asana--format-attachments attachments)))
     (when comments
-      (insert (org-asana--format-comments comments)))
-    ;; Add new comments section template
-    (insert "\n*** New Comments\n")
-    (insert ";; Add new comments here as list items (- comment text)\n")
-    (insert ";; They will be synced to Asana on next sync\n")))
+      (insert (org-asana--format-comments comments)))))
 
 (defun org-asana--extract-new-comments ()
   "Extract new comments from current org task."
