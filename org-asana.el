@@ -344,5 +344,78 @@
              (org-asana--create-org-node project 2))
            project-tree)))
 
+;;; Rendering Functions
+
+(defun org-asana--render-org-tree (org-tree buffer)
+  "Render ORG-TREE to BUFFER."
+  (with-current-buffer buffer
+    (erase-buffer)
+    (insert "#+TITLE: Asana Tasks\n")
+    (insert "#+STARTUP: overview\n\n")
+    (dolist (node org-tree)
+      (org-asana--render-node node))
+    (goto-char (point-min))))
+
+(defun org-asana--render-node (node)
+  "Render NODE to current buffer."
+  (let ((level (plist-get node :level))
+        (title (plist-get node :title))
+        (properties (plist-get node :properties))
+        (deadline (plist-get node :deadline))
+        (body (plist-get node :body))
+        (children (plist-get node :children)))
+    (org-asana--insert-heading level title)
+    (when deadline
+      (org-asana--insert-deadline deadline))
+    (when properties
+      (org-asana--insert-properties properties))
+    (when body
+      (org-asana--insert-body body))
+    (dolist (child children)
+      (org-asana--render-node child))))
+
+(defun org-asana--insert-heading (level title)
+  "Insert heading at LEVEL with TITLE."
+  (insert (make-string level ?*) " " title)
+  (when (or (= level 2) (= level 3))
+    (insert " [/]"))
+  (insert "\n"))
+
+(defun org-asana--insert-deadline (deadline)
+  "Insert DEADLINE on current heading."
+  (when deadline
+    (insert "DEADLINE: " deadline "\n")))
+
+(defun org-asana--insert-properties (properties)
+  "Insert PROPERTIES drawer."
+  (insert ":PROPERTIES:\n")
+  (dolist (prop properties)
+    (when (cdr prop)
+      (insert ":" (car prop) ": " (cdr prop) "\n")))
+  (insert ":END:\n"))
+
+(defun org-asana--insert-body (body)
+  "Insert BODY text."
+  (when (and body (not (string-empty-p body)))
+    (insert "\n" body "\n")))
+
+(defun org-asana--update-progress-indicators ()
+  "Update progress indicators for all headings."
+  (when org-asana-show-progress-indicators
+    (save-excursion
+      (goto-char (point-min))
+      (while (re-search-forward "^\\*\\*+ .+\\[\\([0-9]+\\)/\\([0-9]+\\)\\]" nil t)
+        (let ((done 0)
+              (total 0))
+          (save-excursion
+            (org-narrow-to-subtree)
+            (goto-char (point-min))
+            (while (re-search-forward "^\\*\\{4,\\} \\(TODO\\|DONE\\)" nil t)
+              (setq total (1+ total))
+              (when (string= (match-string 1) "DONE")
+                (setq done (1+ done))))
+            (widen))
+          (replace-match (format "[%d/%d]" done total) nil nil nil 0))))))
+
 (provide 'org-asana)
 ;;; org-asana.el ends here
