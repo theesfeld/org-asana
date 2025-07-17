@@ -496,9 +496,26 @@ Set to 1 to disable retries entirely."
   (with-current-buffer buffer
     (unless (derived-mode-p 'org-mode)
       (org-mode))
-    (when (= (buffer-size) 0)
-      (insert "* Active Projects\n\n* COMPLETED\n")
-      (goto-char (point-min)))))
+    ;; Ensure Active Projects section exists
+    (goto-char (point-min))
+    (unless (re-search-forward "^\\* Active Projects$" nil t)
+      (goto-char (point-min))
+      ;; Insert at the beginning if buffer is empty or has no level-1 headings
+      (if (or (= (buffer-size) 0)
+              (not (re-search-forward "^\\* " nil t)))
+          (progn
+            (goto-char (point-min))
+            (insert "* Active Projects\n\n"))
+        ;; Insert before first level-1 heading
+        (goto-char (match-beginning 0))
+        (insert "* Active Projects\n\n")))
+    ;; Ensure COMPLETED section exists
+    (goto-char (point-min))
+    (unless (re-search-forward "^\\* COMPLETED$" nil t)
+      (goto-char (point-max))
+      (unless (bolp) (insert "\n"))
+      (insert "* COMPLETED\n"))
+    (goto-char (point-min))))
 
 (defun org-asana--orchestrate-sync (buffer)
   "Orchestrate sync process in BUFFER."
@@ -1489,55 +1506,69 @@ Set to 1 to disable retries entirely."
              (membership (car memberships)) ; Take first membership
              (project (alist-get 'project membership))
              (section (alist-get 'section membership))
+             (project-gid (alist-get 'gid project))
              (project-name (alist-get 'name project))
+             (section-gid (alist-get 'gid section))
              (section-name (alist-get 'name section)))
         (when (and project-name section-name)
-          (let* ((project-entry (assoc project-name tree))
-                 (section-entry (when project-entry
-                                 (assoc section-name (cdr project-entry)))))
+          (let* ((project-entry (assoc-string project-name tree)))
             ;; Create project if doesn't exist
             (unless project-entry
-              (setq project-entry (list project-name))
+              (setq project-entry (list project-name :gid project-gid))
               (push project-entry tree))
-            ;; Create section if doesn't exist
-            (unless section-entry
-              (setq section-entry (list section-name))
-              (setcdr project-entry (cons section-entry (cdr project-entry))))
-            ;; Add task to section
-            (setcdr section-entry (cons task (cdr section-entry)))))))
+            ;; Find or create section
+            (let ((section-entry (assoc-string section-name (cddr project-entry))))
+              (unless section-entry
+                (setq section-entry (list section-name :gid section-gid))
+                (setcdr (cdr project-entry) (cons section-entry (cddr project-entry))))
+              ;; Add task to section
+              (setcdr (cdr section-entry) (cons task (cddr section-entry))))))))
     ;; Reverse the order of sections and tasks within each section
     (dolist (project-entry tree)
-      (setcdr project-entry (nreverse (cdr project-entry)))
-      (dolist (section-entry (cdr project-entry))
-        (setcdr section-entry (nreverse (cdr section-entry)))))
+      (let ((sections (cddr project-entry)))
+        (setcdr (cdr project-entry) (nreverse sections))
+        (dolist (section-entry sections)
+          (setcdr (cdr section-entry) (nreverse (cddr section-entry))))))
     (nreverse tree)))
 
 (defun org-asana--process-rich-project-sections (project-entry section-start task-metadata)
   "Process PROJECT-ENTRY sections with rich task data."
   (let* ((project-name (car project-entry))
-         (sections (cdr project-entry))
+         (project-gid (plist-get (cdr project-entry) :gid))
+         (sections (cddr project-entry))
          (project-pos (org-asana--find-or-create-heading 2 project-name section-start)))
-    (when org-asana-debug
-      (message "Processing project '%s' at pos %s with %d sections" 
-               project-name project-pos (length sections)))
-    (dolist (section-entry sections)
-      (let* ((section-name (car section-entry))
-             (section-tasks (cdr section-entry)))
-        (when org-asana-debug
-          (message "Processing section '%s' with %d tasks" 
-                   section-name (length section-tasks)))
-        (when section-tasks
-          (let ((section-pos (org-asana--find-or-create-heading 3 section-name project-pos)))
-            (when org-asana-debug
-              (message "Section '%s' created/found at pos %s" section-name section-pos))
-            ;; Process each task in the section
-            (dolist (task section-tasks)
-              (condition-case err
-                  (org-asana--process-rich-single-task task task-metadata section-pos)
-                (error
-                 (message "Error processing task: %s" (error-message-string err))
-                 (when org-asana-debug
-                   (message "Task data: %S" task)))))))))))
+    (when project-pos
+      ;; Add project GID property
+      (save-excursion
+        (goto-char project-pos)
+        (org-set-property "ASANA-PROJECT-GID" project-gid))
+      (when org-asana-debug
+        (message "Processing project '%s' (GID: %s) at pos %s with %d sections" 
+                 project-name project-gid project-pos (length sections)))
+      (dolist (section-entry sections)
+        (let* ((section-name (car section-entry))
+               (section-gid (plist-get (cdr section-entry) :gid))
+               (section-tasks (cddr section-entry)))
+          (when org-asana-debug
+            (message "Processing section '%s' (GID: %s) with %d tasks" 
+                     section-name section-gid (length section-tasks)))
+          (when section-tasks
+            (let ((section-pos (org-asana--find-or-create-heading 3 section-name project-pos)))
+              (when section-pos
+                ;; Add section GID property
+                (save-excursion
+                  (goto-char section-pos)
+                  (org-set-property "ASANA-SECTION-GID" section-gid))
+                (when org-asana-debug
+                  (message "Section '%s' created/found at pos %s" section-name section-pos))
+                ;; Process each task in the section
+                (dolist (task section-tasks)
+                  (condition-case err
+                      (org-asana--process-rich-single-task task task-metadata section-pos)
+                    (error
+                     (message "Error processing task: %s" (error-message-string err))
+                     (when org-asana-debug
+                       (message "Task data: %S" task)))))))))))))
 
 (defun org-asana--process-rich-single-task (task task-metadata task-pos)
   "Process single rich TASK with TASK-METADATA at TASK-POS."
