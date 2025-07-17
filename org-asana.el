@@ -42,5 +42,56 @@
 (require 'url)
 (require 'subr-x)
 
+;;; Custom Variables
+
+(defgroup org-asana nil
+  "Options for org-asana."
+  :tag "Org Asana"
+  :group 'org)
+
+(defcustom org-asana-token nil
+  "Personal Access Token for Asana API."
+  :type 'string
+  :group 'org-asana)
+
+(defcustom org-asana-org-file "~/org/asana.org"
+  "Path to the Org file for Asana tasks."
+  :type 'file
+  :group 'org-asana)
+
+(defcustom org-asana-fetch-metadata t
+  "Whether to fetch comments and attachments for tasks."
+  :type 'boolean
+  :group 'org-asana)
+
+(defcustom org-asana-show-progress-indicators t
+  "Whether to show [done/total] progress indicators on headings."
+  :type 'boolean
+  :group 'org-asana)
+
+(defcustom org-asana-rate-limit-delay 0.4
+  "Delay in seconds between API requests to respect rate limits."
+  :type 'number
+  :group 'org-asana)
+
+(defcustom org-asana-debug nil
+  "Enable debug messages during sync operations."
+  :type 'boolean
+  :group 'org-asana)
+
+;;; Constants
+
+(defconst org-asana-api-base-url "https://app.asana.com/api/1.0"
+  "Base URL for Asana API requests.")
+
+(defconst org-asana-rate-limit-max 150
+  "Maximum API requests per minute.")
+
+(defvar org-asana--rate-limit-remaining org-asana-rate-limit-max
+  "Remaining API calls in current rate limit window.")
+
+(defvar org-asana--rate-limit-reset nil
+  "Time when rate limit resets.")
+
 (provide 'org-asana)
 ;;; org-asana.el ends here
