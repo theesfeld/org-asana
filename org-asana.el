@@ -177,10 +177,16 @@
   (let* ((workspace-info (org-asana--fetch-workspace-info))
          (user-gid (car workspace-info))
          (workspace-gid (cadr workspace-info))
-         (opt-fields (concat "gid,name,notes,completed,due_on,due_at,"
+         (opt-fields (concat "gid,name,notes,html_notes,completed,completed_at,"
+                            "due_on,due_at,start_on,start_at,"
                             "created_at,modified_at,created_by.name,"
+                            "assignee.name,assignee_status,"
+                            "followers.name,num_likes,liked,"
+                            "parent.gid,parent.name,num_subtasks,"
+                            "tags.gid,tags.name,"
                             "memberships.project.gid,memberships.project.name,"
-                            "memberships.section.gid,memberships.section.name"))
+                            "memberships.section.gid,memberships.section.name,"
+                            "permalink_url,resource_subtype"))
          (endpoint (format "/workspaces/%s/tasks/search?assignee.any=%s&completed=false&limit=100&opt_fields=%s"
                           workspace-gid user-gid opt-fields)))
     (org-asana--fetch-paginated endpoint)))
@@ -289,17 +295,43 @@
       (setq sanitized (replace-regexp-in-string "\\[\\[.*?\\]\\[\\(.*?\\)\\]\\]" "\\1" sanitized))
       sanitized)))
 
+(defun org-asana--clean-notes (notes)
+  "Clean NOTES field from org-mode corruption."
+  (when notes
+    (let ((cleaned notes))
+      (setq cleaned (replace-regexp-in-string ":PROPERTIES:.*?:END:\n?" "" cleaned))
+      (setq cleaned (replace-regexp-in-string "^ODO .*$" "" cleaned))
+      (setq cleaned (replace-regexp-in-string "DEADLINE:.*$" "" cleaned))
+      (setq cleaned (replace-regexp-in-string "\\[\\[.*?\\]\\[\\(.*?\\)\\]\\]" "\\1" cleaned))
+      (setq cleaned (replace-regexp-in-string "/[0-9]+/[0-9]+/project/[^]]*\\]\\[" "" cleaned))
+      (setq cleaned (replace-regexp-in-string "\\*+" "" cleaned))
+      (setq cleaned (string-trim cleaned))
+      (if (string-empty-p cleaned) nil cleaned))))
+
 (defun org-asana--task-to-properties (task metadata)
   "Convert TASK and METADATA to property list."
   (let ((stories (car metadata))
-        (attachments (cdr metadata)))
+        (attachments (cdr metadata))
+        (followers (alist-get 'followers task)))
     (list :gid (alist-get 'gid task)
           :name (org-asana--sanitize-text (alist-get 'name task))
-          :notes (org-asana--sanitize-text (alist-get 'notes task))
+          :notes (org-asana--clean-notes (alist-get 'notes task))
           :due-on (org-asana--format-date (alist-get 'due_on task))
+          :start-on (org-asana--format-date (alist-get 'start_on task))
           :created-at (org-asana--format-timestamp (alist-get 'created_at task))
           :modified-at (org-asana--format-timestamp (alist-get 'modified_at task))
           :created-by (alist-get 'name (alist-get 'created_by task))
+          :assignee (alist-get 'name (alist-get 'assignee task))
+          :assignee-status (alist-get 'assignee_status task)
+          :followers (mapcar (lambda (f) (alist-get 'name f)) 
+                            (if (vectorp followers) (append followers nil) followers))
+          :num-likes (alist-get 'num_likes task)
+          :tags (mapcar (lambda (tag) (alist-get 'name tag))
+                       (let ((tags (alist-get 'tags task)))
+                         (if (vectorp tags) (append tags nil) tags)))
+          :permalink (alist-get 'permalink_url task)
+          :parent (alist-get 'name (alist-get 'parent task))
+          :num-subtasks (alist-get 'num_subtasks task)
           :stories stories
           :attachments attachments)))
 
@@ -379,10 +411,15 @@
              (props (org-asana--task-to-properties task-data nil)))
         (list :level level
               :title (plist-get props :name)
+              :todo-keyword "TODO"
               :properties `(("ASANA-TASK-GID" . ,(plist-get props :gid))
                            ("ASANA-CREATED-AT" . ,(plist-get props :created-at))
-                           ("ASANA-MODIFIED-AT" . ,(plist-get props :modified-at)))
+                           ("ASANA-MODIFIED-AT" . ,(plist-get props :modified-at))
+                           ("ASANA-CREATED-BY" . ,(plist-get props :created-by))
+                           ("ASANA-ASSIGNEE" . ,(plist-get props :assignee))
+                           ("ASANA-PERMALINK" . ,(plist-get props :permalink)))
               :deadline (plist-get props :due-on)
+              :scheduled (plist-get props :start-on)
               :body (plist-get props :notes)))))))
 
 (defun org-asana--build-org-tree (tasks)
@@ -408,13 +445,17 @@
   "Render NODE to current buffer."
   (let ((level (plist-get node :level))
         (title (plist-get node :title))
+        (todo-keyword (plist-get node :todo-keyword))
         (properties (plist-get node :properties))
         (deadline (plist-get node :deadline))
+        (scheduled (plist-get node :scheduled))
         (body (plist-get node :body))
         (children (plist-get node :children)))
-    (org-asana--insert-heading level title)
+    (org-asana--insert-heading level title todo-keyword)
     (when deadline
       (org-asana--insert-deadline deadline))
+    (when scheduled
+      (org-asana--insert-scheduled scheduled))
     (when properties
       (org-asana--insert-properties properties))
     (when body
@@ -422,9 +463,12 @@
     (dolist (child children)
       (org-asana--render-node child))))
 
-(defun org-asana--insert-heading (level title)
-  "Insert heading at LEVEL with TITLE."
-  (insert (make-string level ?*) " " title)
+(defun org-asana--insert-heading (level title &optional todo-keyword)
+  "Insert heading at LEVEL with TITLE and optional TODO-KEYWORD."
+  (insert (make-string level ?*) " ")
+  (when (and todo-keyword (>= level 4))
+    (insert todo-keyword " "))
+  (insert title)
   (when (or (= level 2) (= level 3))
     (insert " [/]"))
   (insert "\n"))
@@ -433,6 +477,11 @@
   "Insert DEADLINE on current heading."
   (when deadline
     (insert "DEADLINE: " deadline "\n")))
+
+(defun org-asana--insert-scheduled (scheduled)
+  "Insert SCHEDULED date on current heading."
+  (when scheduled
+    (insert "SCHEDULED: " scheduled "\n")))
 
 (defun org-asana--insert-properties (properties)
   "Insert PROPERTIES drawer."
@@ -535,16 +584,52 @@
       (let* ((task-data (plist-get item :data))
              (task-gid (alist-get 'gid task-data))
              (metadata (gethash task-gid metadata-map))
-             (props (org-asana--task-to-properties task-data metadata)))
+             (props (org-asana--task-to-properties task-data metadata))
+             (followers (plist-get props :followers))
+             (tags (plist-get props :tags)))
         (list :level level
               :title (plist-get props :name)
+              :todo-keyword "TODO"
               :properties `(("ASANA-TASK-GID" . ,(plist-get props :gid))
                            ("ASANA-CREATED-AT" . ,(plist-get props :created-at))
-                           ("ASANA-MODIFIED-AT" . ,(plist-get props :modified-at)))
+                           ("ASANA-MODIFIED-AT" . ,(plist-get props :modified-at))
+                           ("ASANA-CREATED-BY" . ,(plist-get props :created-by))
+                           ("ASANA-ASSIGNEE" . ,(plist-get props :assignee))
+                           ("ASANA-STATUS" . ,(plist-get props :assignee-status))
+                           ("ASANA-FOLLOWERS" . ,(when followers (string-join followers ", ")))
+                           ("ASANA-TAGS" . ,(when tags (string-join tags ", ")))
+                           ("ASANA-LIKES" . ,(format "%d" (or (plist-get props :num-likes) 0)))
+                           ("ASANA-PERMALINK" . ,(plist-get props :permalink)))
               :deadline (plist-get props :due-on)
-              :body (plist-get props :notes)))))))
+              :scheduled (plist-get props :start-on)
+              :body (org-asana--format-task-body props metadata)))))))
 
 ;;; Utility Functions
+
+(defun org-asana--format-task-body (props metadata)
+  "Format task body from PROPS and METADATA."
+  (let ((notes (plist-get props :notes))
+        (stories (car metadata))
+        (attachments (cdr metadata))
+        (body-parts '()))
+    (when (and notes (not (string-empty-p notes)))
+      (push notes body-parts))
+    (when (and attachments (> (length attachments) 0))
+      (push "\n** Attachments" body-parts)
+      (dolist (att attachments)
+        (let ((name (alist-get 'name att))
+              (url (alist-get 'view_url att)))
+          (push (format "- [[%s][%s]]" url name) body-parts))))
+    (when (and stories org-asana-fetch-metadata (> (length stories) 0))
+      (push "\n** Comments" body-parts)
+      (dolist (story stories)
+        (when (equal (alist-get 'type story) "comment")
+          (let ((text (alist-get 'text story))
+                (author (alist-get 'name (alist-get 'created_by story)))
+                (date (org-asana--format-timestamp (alist-get 'created_at story))))
+            (push (format "- %s (%s): %s" author date text) body-parts)))))
+    (when body-parts
+      (string-join (nreverse body-parts) "\n"))))
 
 (defun org-asana--validate-token ()
   "Validate the Asana token is configured."
