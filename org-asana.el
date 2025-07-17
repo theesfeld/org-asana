@@ -168,5 +168,96 @@
       (cons (alist-get 'data stories)
             (alist-get 'data attachments)))))
 
+;;; Data Transformation Functions
+
+(defun org-asana--group-tasks-by-project (tasks)
+  "Group TASKS by their project membership."
+  (let ((projects (make-hash-table :test 'equal)))
+    (dolist (task tasks)
+      (let* ((memberships (alist-get 'memberships task))
+             (membership (car memberships))
+             (project (alist-get 'project membership))
+             (project-gid (alist-get 'gid project)))
+        (when project-gid
+          (let ((project-tasks (gethash project-gid projects)))
+            (puthash project-gid (cons task project-tasks) projects)))))
+    projects))
+
+(defun org-asana--group-tasks-by-section (project-tasks)
+  "Group PROJECT-TASKS by their section."
+  (let ((sections (make-hash-table :test 'equal)))
+    (dolist (task project-tasks)
+      (let* ((memberships (alist-get 'memberships task))
+             (membership (car memberships))
+             (section (alist-get 'section membership))
+             (section-gid (alist-get 'gid section)))
+        (when section-gid
+          (let ((section-tasks (gethash section-gid sections)))
+            (puthash section-gid (cons task section-tasks) sections)))))
+    sections))
+
+(defun org-asana--extract-unique-projects (tasks)
+  "Extract unique project data from TASKS."
+  (let ((projects (make-hash-table :test 'equal))
+        (result '()))
+    (dolist (task tasks)
+      (let* ((memberships (alist-get 'memberships task))
+             (membership (car memberships))
+             (project (alist-get 'project membership))
+             (project-gid (alist-get 'gid project)))
+        (when (and project-gid (not (gethash project-gid projects)))
+          (puthash project-gid t projects)
+          (push project result))))
+    (nreverse result)))
+
+(defun org-asana--extract-sections-for-project (tasks project-gid)
+  "Extract unique sections for PROJECT-GID from TASKS."
+  (let ((sections (make-hash-table :test 'equal))
+        (result '()))
+    (dolist (task tasks)
+      (let* ((memberships (alist-get 'memberships task))
+             (membership (car memberships))
+             (project (alist-get 'project membership))
+             (section (alist-get 'section membership))
+             (task-project-gid (alist-get 'gid project))
+             (section-gid (alist-get 'gid section)))
+        (when (and (equal task-project-gid project-gid)
+                   section-gid
+                   (not (gethash section-gid sections)))
+          (puthash section-gid t sections)
+          (push section result))))
+    (nreverse result)))
+
+(defun org-asana--format-timestamp (timestamp)
+  "Format Asana TIMESTAMP to Org date format."
+  (when timestamp
+    (format-time-string "<%Y-%m-%d %a %H:%M>"
+                       (date-to-time timestamp))))
+
+(defun org-asana--format-date (date-string)
+  "Format Asana DATE-STRING to Org date format."
+  (when date-string
+    (format-time-string "<%Y-%m-%d %a>"
+                       (date-to-time date-string))))
+
+(defun org-asana--sanitize-text (text)
+  "Sanitize TEXT for safe inclusion in Org files."
+  (when text
+    (replace-regexp-in-string "\\*" "\\\\*" text)))
+
+(defun org-asana--task-to-properties (task metadata)
+  "Convert TASK and METADATA to property list."
+  (let ((stories (car metadata))
+        (attachments (cdr metadata)))
+    (list :gid (alist-get 'gid task)
+          :name (org-asana--sanitize-text (alist-get 'name task))
+          :notes (org-asana--sanitize-text (alist-get 'notes task))
+          :due-on (org-asana--format-date (alist-get 'due_on task))
+          :created-at (org-asana--format-timestamp (alist-get 'created_at task))
+          :modified-at (org-asana--format-timestamp (alist-get 'modified_at task))
+          :created-by (alist-get 'name (alist-get 'created_by task))
+          :stories stories
+          :attachments attachments)))
+
 (provide 'org-asana)
 ;;; org-asana.el ends here
