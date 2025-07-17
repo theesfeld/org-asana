@@ -1303,7 +1303,7 @@ Set to 1 to disable retries entirely."
         (comments (plist-get task-fields :comments))
         (attachments (plist-get task-fields :attachments)))
     (when org-asana-debug
-      (message "Adding notes - comments: %s attachments: %s" 
+      (message "Adding notes - comments: %s attachments: %s"
                (if comments "yes" "no")
                (if attachments "yes" "no")))
     (org-end-of-meta-data t)
@@ -1519,16 +1519,20 @@ Set to 1 to disable retries entirely."
             ;; Find or create section
             (let ((section-entry (assoc-string section-name (cddr project-entry))))
               (unless section-entry
-                (setq section-entry (list section-name :gid section-gid))
+                (setq section-entry (list section-name :gid section-gid :tasks nil))
                 (setcdr (cdr project-entry) (cons section-entry (cddr project-entry))))
-              ;; Add task to section
-              (setcdr (cdr section-entry) (cons task (cddr section-entry))))))))
+              ;; Add task to section's task list
+              (let ((tasks-cell (member :tasks section-entry)))
+                (when tasks-cell
+                  (setcar (cdr tasks-cell) (cons task (cadr tasks-cell))))))))))
     ;; Reverse the order of sections and tasks within each section
     (dolist (project-entry tree)
       (let ((sections (cddr project-entry)))
         (setcdr (cdr project-entry) (nreverse sections))
         (dolist (section-entry sections)
-          (setcdr (cdr section-entry) (nreverse (cddr section-entry))))))
+          (let ((tasks-cell (member :tasks section-entry)))
+            (when tasks-cell
+              (setcar (cdr tasks-cell) (nreverse (cadr tasks-cell))))))))
     (nreverse tree)))
 
 (defun org-asana--process-rich-project-sections (project-entry section-start task-metadata)
@@ -1548,19 +1552,15 @@ Set to 1 to disable retries entirely."
         (goto-char project-pos)
         (org-set-property "ASANA-PROJECT-GID" project-gid))
       (when org-asana-debug
-        (message "Processing project '%s' (GID: %s) at pos %s with %d sections" 
+        (message "Processing project '%s' (GID: %s) at pos %s with %d sections"
                  project-name project-gid project-pos (length sections)))
       (dolist (section-entry sections)
         (let* ((section-name (car section-entry))
-               (section-data (cdr section-entry))
-               (section-gid (if (eq (car section-data) :gid)
-                               (cadr section-data)
-                             nil))
-               (section-tasks (if (eq (car section-data) :gid)
-                                 (cddr section-data)
-                               section-data)))
+               (section-plist (cdr section-entry))
+               (section-gid (plist-get section-plist :gid))
+               (section-tasks (plist-get section-plist :tasks)))
           (when org-asana-debug
-            (message "Processing section '%s' (GID: %s) with %d tasks" 
+            (message "Processing section '%s' (GID: %s) with %d tasks"
                      section-name section-gid (length section-tasks)))
           (when section-tasks
             (let ((section-pos (org-asana--find-or-create-heading 3 section-name project-pos)))
