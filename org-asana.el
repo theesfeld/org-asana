@@ -299,12 +299,13 @@
   "Clean NOTES field from org-mode corruption."
   (when notes
     (let ((cleaned notes))
-      (setq cleaned (replace-regexp-in-string ":PROPERTIES:.*?:END:\n?" "" cleaned))
-      (setq cleaned (replace-regexp-in-string "^ODO .*$" "" cleaned))
-      (setq cleaned (replace-regexp-in-string "DEADLINE:.*$" "" cleaned))
-      (setq cleaned (replace-regexp-in-string "\\[\\[.*?\\]\\[\\(.*?\\)\\]\\]" "\\1" cleaned))
-      (setq cleaned (replace-regexp-in-string "/[0-9]+/[0-9]+/project/[^]]*\\]\\[" "" cleaned))
-      (setq cleaned (replace-regexp-in-string "\\*+" "" cleaned))
+      (setq cleaned (replace-regexp-in-string ":PROPERTIES:[\n\r\\s]*\\(?:.*[\n\r]\\)*?:END:[\n\r]*" "" cleaned))
+      (setq cleaned (replace-regexp-in-string "^ODO .*[\n\r]*" "" cleaned))
+      (setq cleaned (replace-regexp-in-string "DEADLINE: <[^>]+>[\n\r]*" "" cleaned))
+      (setq cleaned (replace-regexp-in-string "\\[\\[https?://[^]]+\\]\\[\\([^]]+\\)\\]\\]" "\\1" cleaned))
+      (setq cleaned (replace-regexp-in-string "/[0-9]+/[0-9]+/[^]]+\\]\\[" "" cleaned))
+      (setq cleaned (replace-regexp-in-string "^\\*+ " "" cleaned))
+      (setq cleaned (replace-regexp-in-string ":ASANA[^:]*: [^\n]+[\n\r]*" "" cleaned))
       (setq cleaned (string-trim cleaned))
       (if (string-empty-p cleaned) nil cleaned))))
 
@@ -519,7 +520,8 @@
 (defun org-asana--sync-from-asana ()
   "Main sync function - fetch, transform, and render."
   (message "Starting Asana sync...")
-  (let* ((tasks (org-asana--fetch-all-tasks))
+  (let* ((tasks-raw (org-asana--fetch-all-tasks))
+         (tasks (if (vectorp tasks-raw) (append tasks-raw nil) tasks-raw))
          (task-count (length tasks))
          (metadata-map (when org-asana-fetch-metadata
                         (org-asana--fetch-all-metadata tasks)))
@@ -542,8 +544,9 @@
 
 (defun org-asana--fetch-all-metadata (tasks)
   "Fetch metadata for all TASKS and return as hash table."
-  (let ((metadata (make-hash-table :test 'equal)))
-    (dolist (task tasks)
+  (let ((metadata (make-hash-table :test 'equal))
+        (task-list (if (vectorp tasks) (append tasks nil) tasks)))
+    (dolist (task task-list)
       (let ((task-gid (alist-get 'gid task)))
         (when org-asana-debug
           (message "Fetching metadata for task: %s" task-gid))
@@ -615,13 +618,13 @@
     (when (and notes (not (string-empty-p notes)))
       (push notes body-parts))
     (when (and attachments (> (length attachments) 0))
-      (push "\n** Attachments" body-parts)
+      (push "\n***** Attachments" body-parts)
       (dolist (att attachments)
         (let ((name (alist-get 'name att))
               (url (alist-get 'view_url att)))
           (push (format "- [[%s][%s]]" url name) body-parts))))
     (when (and stories org-asana-fetch-metadata (> (length stories) 0))
-      (push "\n** Comments" body-parts)
+      (push "\n***** Comments" body-parts)
       (dolist (story stories)
         (when (equal (alist-get 'type story) "comment")
           (let ((text (alist-get 'text story))
