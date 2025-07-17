@@ -1534,8 +1534,13 @@ Set to 1 to disable retries entirely."
 (defun org-asana--process-rich-project-sections (project-entry section-start task-metadata)
   "Process PROJECT-ENTRY sections with rich task data."
   (let* ((project-name (car project-entry))
-         (project-gid (plist-get (cdr project-entry) :gid))
-         (sections (cddr project-entry))
+         (project-data (cdr project-entry))
+         (project-gid (if (eq (car project-data) :gid)
+                          (cadr project-data)
+                        nil))
+         (sections (if (eq (car project-data) :gid)
+                       (cddr project-data)
+                     project-data))
          (project-pos (org-asana--find-or-create-heading 2 project-name section-start)))
     (when project-pos
       ;; Add project GID property
@@ -1547,8 +1552,13 @@ Set to 1 to disable retries entirely."
                  project-name project-gid project-pos (length sections)))
       (dolist (section-entry sections)
         (let* ((section-name (car section-entry))
-               (section-gid (plist-get (cdr section-entry) :gid))
-               (section-tasks (cddr section-entry)))
+               (section-data (cdr section-entry))
+               (section-gid (if (eq (car section-data) :gid)
+                               (cadr section-data)
+                             nil))
+               (section-tasks (if (eq (car section-data) :gid)
+                                 (cddr section-data)
+                               section-data)))
           (when org-asana-debug
             (message "Processing section '%s' (GID: %s) with %d tasks" 
                      section-name section-gid (length section-tasks)))
