@@ -522,9 +522,6 @@ Set to 1 to disable retries entirely."
   (with-current-buffer buffer
     (org-asana--perform-sync-operations)
     (org-asana--apply-visual-enhancements)
-    ;; Collapse all property drawers and task headings
-    (org-asana--collapse-all-drawers)
-    (org-asana--collapse-all-tasks)
     (save-buffer)))
 
 (defun org-asana--collapse-all-drawers ()
@@ -1167,6 +1164,10 @@ Set to 1 to disable retries entirely."
 
 (defun org-asana--update-task-properties (task-fields)
   "Update all task properties from TASK-FIELDS."
+  ;; Set the task GID first
+  (let ((task-gid (plist-get task-fields :task-id)))
+    (when task-gid
+      (org-set-property "ASANA-TASK-GID" task-gid)))
   (org-asana--update-permalink-property task-fields)
   (org-asana--update-followers-property task-fields)
   (org-asana--update-parent-properties task-fields)
@@ -1580,10 +1581,10 @@ Set to 1 to disable retries entirely."
                      (when org-asana-debug
                        (message "Task data: %S" task)))))))))))))
 
-(defun org-asana--process-rich-single-task (task task-metadata task-pos)
-  "Process single rich TASK with TASK-METADATA at TASK-POS."
-  (unless task-pos
-    (error "org-asana--process-rich-single-task: task-pos is nil"))
+(defun org-asana--process-rich-single-task (task task-metadata section-pos)
+  "Process single rich TASK with TASK-METADATA at SECTION-POS."
+  (unless section-pos
+    (error "org-asana--process-rich-single-task: section-pos is nil"))
   (let* ((task-gid (alist-get 'gid task))
          (task-name (alist-get 'name task))
          (clean-task-name (org-asana--strip-org-links task-name))
@@ -1591,11 +1592,14 @@ Set to 1 to disable retries entirely."
          (stories (when metadata-entry (cadr metadata-entry)))
          (attachments (when metadata-entry (cddr metadata-entry)))
          (task-fields (org-asana--extract-rich-task-fields task stories attachments))
-         ;; Find or create task heading
-         (heading-pos (org-asana--find-or-create-heading 4 clean-task-name task-pos)))
+         ;; First try to find existing task by GID
+         (existing-pos (org-asana--find-task-by-gid task-gid section-pos))
+         (heading-pos (or existing-pos
+                         (org-asana--create-task-heading clean-task-name section-pos))))
     (when heading-pos
-      (goto-char heading-pos)
-      (org-asana--update-rich-task task-fields))))
+      (save-excursion
+        (goto-char heading-pos)
+        (org-asana--update-rich-task task-fields)))))
 
 (defun org-asana--extract-rich-task-fields (task stories attachments)
   "Extract task fields from rich TASK data with STORIES and ATTACHMENTS."
@@ -1901,6 +1905,28 @@ Uses org-map-entries for robust subtree boundary handling."
            (setq found-pos (point))))
        nil 'tree)
       found-pos)))
+
+(defun org-asana--find-task-by-gid (task-gid parent-pos)
+  "Find task with TASK-GID in subtree starting at PARENT-POS."
+  (save-excursion
+    (goto-char parent-pos)
+    (let ((found-pos nil)
+          (end-pos (save-excursion (org-end-of-subtree t) (point))))
+      (while (and (not found-pos)
+                  (re-search-forward "^\\*\\*\\*\\* " end-pos t))
+        (when (string= (org-entry-get (point) "ASANA-TASK-GID") task-gid)
+          (setq found-pos (point))))
+      found-pos)))
+
+(defun org-asana--create-task-heading (task-name parent-pos)
+  "Create new task heading with TASK-NAME under PARENT-POS."
+  (save-excursion
+    (goto-char parent-pos)
+    (org-end-of-subtree t)
+    (unless (bolp) (insert "\n"))
+    (insert "**** TODO " task-name "\n")
+    (forward-line -1)
+    (point)))
 
 (defun org-asana--update-heading (new-text)
   "Update current heading text to NEW-TEXT."
