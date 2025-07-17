@@ -259,5 +259,90 @@
           :stories stories
           :attachments attachments)))
 
+;;; Org Tree Building Functions
+
+(defun org-asana--build-project-tree (tasks)
+  "Build hierarchical tree structure from flat TASKS list."
+  (let ((tree '()))
+    (dolist (project (org-asana--extract-unique-projects tasks))
+      (let* ((project-gid (alist-get 'gid project))
+             (project-name (alist-get 'name project))
+             (project-sections (org-asana--build-sections-tree tasks project-gid)))
+        (push (list :type 'project
+                    :gid project-gid
+                    :name project-name
+                    :children project-sections)
+              tree)))
+    (nreverse tree)))
+
+(defun org-asana--build-sections-tree (tasks project-gid)
+  "Build sections tree for PROJECT-GID from TASKS."
+  (let ((sections '()))
+    (dolist (section (org-asana--extract-sections-for-project tasks project-gid))
+      (let* ((section-gid (alist-get 'gid section))
+             (section-name (alist-get 'name section))
+             (section-tasks (org-asana--get-tasks-for-section tasks project-gid section-gid)))
+        (push (list :type 'section
+                    :gid section-gid
+                    :name section-name
+                    :children section-tasks)
+              sections)))
+    (nreverse sections)))
+
+(defun org-asana--get-tasks-for-section (tasks project-gid section-gid)
+  "Get tasks for PROJECT-GID and SECTION-GID from TASKS."
+  (let ((section-tasks '()))
+    (dolist (task tasks)
+      (let* ((memberships (alist-get 'memberships task))
+             (membership (car memberships))
+             (project (alist-get 'project membership))
+             (section (alist-get 'section membership))
+             (task-project-gid (alist-get 'gid project))
+             (task-section-gid (alist-get 'gid section)))
+        (when (and (equal task-project-gid project-gid)
+                   (equal task-section-gid section-gid))
+          (push (list :type 'task
+                      :gid (alist-get 'gid task)
+                      :name (alist-get 'name task)
+                      :data task)
+                section-tasks))))
+    (nreverse section-tasks)))
+
+(defun org-asana--create-org-node (item level)
+  "Create org node from ITEM at LEVEL."
+  (let ((type (plist-get item :type)))
+    (cond
+     ((eq type 'project)
+      (list :level level
+            :title (plist-get item :name)
+            :properties `(("ASANA-PROJECT-GID" . ,(plist-get item :gid)))
+            :children (mapcar (lambda (child)
+                               (org-asana--create-org-node child (1+ level)))
+                             (plist-get item :children))))
+     ((eq type 'section)
+      (list :level level
+            :title (plist-get item :name)
+            :properties `(("ASANA-SECTION-GID" . ,(plist-get item :gid)))
+            :children (mapcar (lambda (child)
+                               (org-asana--create-org-node child (1+ level)))
+                             (plist-get item :children))))
+     ((eq type 'task)
+      (let* ((task-data (plist-get item :data))
+             (props (org-asana--task-to-properties task-data nil)))
+        (list :level level
+              :title (plist-get props :name)
+              :properties `(("ASANA-TASK-GID" . ,(plist-get props :gid))
+                           ("ASANA-CREATED-AT" . ,(plist-get props :created-at))
+                           ("ASANA-MODIFIED-AT" . ,(plist-get props :modified-at)))
+              :deadline (plist-get props :due-on)
+              :body (plist-get props :notes)))))))
+
+(defun org-asana--build-org-tree (tasks)
+  "Build complete org tree structure from TASKS."
+  (let ((project-tree (org-asana--build-project-tree tasks)))
+    (mapcar (lambda (project)
+             (org-asana--create-org-node project 2))
+           project-tree)))
+
 (provide 'org-asana)
 ;;; org-asana.el ends here
