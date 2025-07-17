@@ -1,1 +1,30 @@
+# Local configuration
 CLAUDE.md
+.claude/
+
+# Compiled files
+*.elc
+
+# Backup files
+*~
+\#*\#
+.#*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Emacs
+auto-save-list
+.dir-locals.el
+
+# Test files
+test-*.org
+test-*.el
+
+# Analysis files
+*-analysis.md
+*-report.md
+analyze-*.sh
+find-*.sh
+check-*.sh
