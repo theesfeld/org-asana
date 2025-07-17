@@ -42,6 +42,28 @@
 (require 'url)
 (require 'subr-x)
 
+;;; Custom Faces
+
+(defface org-asana-priority-high
+  '((t :foreground "red" :weight bold))
+  "Face for high priority tasks."
+  :group 'org-asana)
+
+(defface org-asana-priority-medium  
+  '((t :foreground "orange"))
+  "Face for medium priority tasks."
+  :group 'org-asana)
+
+(defface org-asana-deadline-warning
+  '((t :foreground "dark orange" :weight bold))
+  "Face for tasks with upcoming deadlines."
+  :group 'org-asana)
+
+(defface org-asana-deadline-overdue
+  '((t :foreground "red" :weight bold :underline t))
+  "Face for overdue tasks."
+  :group 'org-asana)
+
 ;;; Custom Variables
 
 (defgroup org-asana nil
@@ -126,14 +148,18 @@
 (defun org-asana--fetch-paginated (endpoint)
   "Fetch all pages of data from ENDPOINT."
   (let ((all-data '())
-        (next-page nil))
+        (next-path nil)
+        (first-request t))
     (catch 'done
       (while t
-        (let* ((url (or next-page endpoint))
+        (let* ((url (if first-request 
+                       endpoint
+                       (alist-get 'path next-path)))
                (response (org-asana--make-request "GET" url)))
+          (setq first-request nil)
           (setq all-data (append all-data (alist-get 'data response)))
-          (setq next-page (alist-get 'next_page response))
-          (unless next-page (throw 'done all-data)))))))
+          (setq next-path (alist-get 'next_page response))
+          (unless next-path (throw 'done all-data)))))))
 
 (defun org-asana--fetch-workspace-info ()
   "Fetch current user and workspace information."
