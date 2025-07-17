@@ -284,7 +284,10 @@
 (defun org-asana--sanitize-text (text)
   "Sanitize TEXT for safe inclusion in Org files."
   (when text
-    (replace-regexp-in-string "\\*" "\\\\*" text)))
+    (let ((sanitized text))
+      (setq sanitized (replace-regexp-in-string "\\*" "\\\\*" sanitized))
+      (setq sanitized (replace-regexp-in-string "\\[\\[.*?\\]\\[\\(.*?\\)\\]\\]" "\\1" sanitized))
+      sanitized)))
 
 (defun org-asana--task-to-properties (task metadata)
   "Convert TASK and METADATA to property list."
@@ -504,7 +507,8 @@
   "Build org tree from TASKS with METADATA-MAP."
   (let ((project-tree (org-asana--build-project-tree tasks)))
     (mapcar (lambda (project)
-             (org-asana--create-org-node-with-metadata project 2 metadata-map tasks))
+             (org-asana--create-org-node-with-metadata 
+              project 2 (or metadata-map (make-hash-table :test 'equal)) tasks))
            project-tree)))
 
 (defun org-asana--create-org-node-with-metadata (item level metadata-map tasks)
