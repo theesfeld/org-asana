@@ -302,8 +302,6 @@ Set to 1 to disable retries entirely."
 (defvar org-asana--rate-limit-reset nil
   "Time when rate limit resets.")
 
-(defvar org-asana--last-request-time nil
-  "Time of last API request.")
 
 ;;; HTTP/API Functions
 
@@ -506,16 +504,6 @@ Set to 1 to disable retries entirely."
     ;; (org-asana--apply-visual-enhancements)
     (save-buffer)))
 
-(defun org-asana--collapse-all-drawers ()
-  "Collapse all property drawers in the buffer."
-  (org-cycle-hide-drawers 'all))
-
-(defun org-asana--collapse-all-tasks ()
-  "Collapse all task headings (level 4 and below)."
-  (save-excursion
-    (goto-char (point-min))
-    (while (re-search-forward "^\\*\\{4,\\} " nil t)
-      (org-cycle))))
 
 (defun org-asana--perform-sync-operations ()
   "Perform core sync operations in order."
@@ -645,31 +633,48 @@ Set to 1 to disable retries entirely."
     (org-set-property "ASANA_COMPLETED_AT"
                      (format-time-string "%Y-%m-%dT%H:%M:%S.000Z"))))
 
+(defun org-asana--extract-task-location (task-info)
+  "Extract start, end, and content from TASK-INFO."
+  (list :start (nth 0 task-info)
+        :end (nth 1 task-info)
+        :content (nth 2 task-info)))
+
+(defun org-asana--extract-task-project (task-info)
+  "Extract project name from TASK-INFO."
+  (car (nth 3 task-info)))
+
+(defun org-asana--extract-task-section (task-info)
+  "Extract section name from TASK-INFO."
+  (let ((sec-data (cdr (nth 3 task-info))))
+    (cond
+     ((stringp sec-data) sec-data)
+     ((and (listp sec-data) (alist-get 'name sec-data))
+      (alist-get 'name sec-data))
+     ((listp sec-data) (car sec-data))
+     (t (format "%s" sec-data)))))
+
+(defun org-asana--delete-task-region (start end)
+  "Delete task region from START to END."
+  (delete-region start end))
+
+(defun org-asana--insert-task-in-completed (content section-pos)
+  "Insert task CONTENT at completed SECTION-POS."
+  (save-excursion
+    (goto-char section-pos)
+    (org-end-of-subtree t)
+    (insert content)
+    (org-asana--add-completion-timestamp)))
+
 (defun org-asana--move-task-to-completed (task-info)
   "Move TASK-INFO to COMPLETED section."
-  (let ((start (nth 0 task-info))
-        (end (nth 1 task-info))
-        (content (nth 2 task-info))
-        (project (car (nth 3 task-info)))
-        (section (let ((sec-data (cdr (nth 3 task-info))))
-                   (cond
-                    ((stringp sec-data) sec-data)
-                    ((and (listp sec-data) (alist-get 'name sec-data))
-                     (alist-get 'name sec-data))
-                    ((listp sec-data) (car sec-data))
-                    (t (format "%s" sec-data))))))
-
-    ;; Delete from active section
-    (delete-region start end)
-
-    ;; Add to completed section
+  (let* ((location (org-asana--extract-task-location task-info))
+         (project (org-asana--extract-task-project task-info))
+         (section (org-asana--extract-task-section task-info)))
+    (org-asana--delete-task-region (plist-get location :start)
+                                   (plist-get location :end))
     (let* ((project-pos (org-asana--find-or-create-completed-project project))
            (section-pos (org-asana--find-or-create-completed-section section project-pos)))
-      (save-excursion
-        (goto-char section-pos)
-        (org-end-of-subtree t)
-        (insert content)
-        (org-asana--add-completion-timestamp)))))
+      (org-asana--insert-task-in-completed (plist-get location :content) section-pos))))
 
 (defun org-asana--get-user-and-workspace-info ()
   "Get user and workspace information from Asana."
@@ -745,37 +750,56 @@ Set to 1 to disable retries entirely."
         (org-asana--report-pagination-error page-count new-error-count max-errors)
         (list all-data nil page-count new-error-count))))) ; Don't advance to next page on error
 
+(defun org-asana--init-pagination-state ()
+  "Initialize pagination state variables."
+  (list :all-data '()
+        :next-page nil
+        :page-count 0
+        :error-count 0
+        :max-errors 3))
+
+(defun org-asana--should-continue-pagination-p (state)
+  "Check if pagination should continue based on STATE."
+  (and (plist-get state :next-page)
+       (< (plist-get state :error-count) 
+          (plist-get state :max-errors))))
+
+(defun org-asana--update-pagination-state (state result)
+  "Update pagination STATE with RESULT values."
+  (plist-put state :all-data (nth 0 result))
+  (plist-put state :next-page (nth 1 result))
+  (plist-put state :page-count (nth 2 result))
+  (plist-put state :error-count (nth 3 result))
+  state)
+
+(defun org-asana--fetch-page-with-error-handling (state)
+  "Fetch next page and handle errors for STATE."
+  (condition-case err
+      (org-asana--process-page-success
+       (org-asana--fetch-single-page (plist-get state :next-page))
+       (plist-get state :all-data)
+       (plist-get state :page-count))
+    (error
+     (org-asana--process-page-error 
+      err 
+      (plist-get state :error-count)
+      (plist-get state :max-errors)
+      (plist-get state :page-count)
+      (plist-get state :all-data)))))
+
 (defun org-asana--fetch-paginated (endpoint)
   "Fetch all pages from ENDPOINT."
-  (let ((all-data '())
-        (next-page endpoint)
-        (page-count 0)
-        (error-count 0)
-        (max-errors 3))
-    (while (and next-page (< error-count max-errors))
-      (condition-case err
-          (let ((result (org-asana--process-page-success
-                        (org-asana--fetch-single-page next-page)
-                        all-data page-count)))
-            (setq all-data (nth 0 result)
-                  next-page (nth 1 result)
-                  page-count (nth 2 result)
-                  error-count (nth 3 result)))
-        (error
-         (let ((result (org-asana--process-page-error err error-count max-errors page-count all-data)))
-           (setq all-data (nth 0 result)
-                 next-page (nth 1 result)
-                 page-count (nth 2 result)
-                 error-count (nth 3 result))))))
-    (org-asana--report-pagination-completion error-count (length all-data))
-    all-data))
+  (let ((state (org-asana--init-pagination-state)))
+    (plist-put state :next-page endpoint)
+    (while (org-asana--should-continue-pagination-p state)
+      (setq state (org-asana--update-pagination-state 
+                   state 
+                   (org-asana--fetch-page-with-error-handling state))))
+    (org-asana--report-pagination-completion 
+     (plist-get state :error-count)
+     (length (plist-get state :all-data)))
+    (plist-get state :all-data)))
 
-(defun org-asana--fetch-incomplete-tasks (user-gid workspace-gid)
-  "Fetch incomplete tasks assigned to USER-GID from WORKSPACE-GID."
-  (let ((opt-fields "gid,name,notes,completed,due_on,due_at,start_on,start_at,modified_at,priority,tags.gid,tags.name,memberships.project.gid,memberships.project.name,memberships.section.name,permalink_url,followers.gid,followers.name,parent.gid,parent.name,custom_fields,dependencies.gid,dependencies.name,dependents.gid,dependents.name,liked,num_likes,hearted,num_hearts"))
-    (org-asana--fetch-paginated
-     (format "/workspaces/%s/tasks/search?assignee.any=%s&completed=false&limit=100&opt_fields=%s"
-             workspace-gid user-gid opt-fields))))
 
 
 (defun org-asana--clean-story-text (text)
@@ -909,34 +933,6 @@ Set to 1 to disable retries entirely."
                 (concat (string-join (nreverse formatted-attachments) "\n\n") "\n")
               ""))))
 
-(defun org-asana--process-project-sections (project-entry section-start batch-data)
-  "Process PROJECT-ENTRY sections under SECTION-START using BATCH-DATA."
-  (let* ((project-name (car project-entry))
-         (sections (cdr project-entry))
-         ;; Only create project heading if it has sections with tasks
-         (has-tasks nil))
-
-    ;; Check if any section has tasks
-    (dolist (section-entry sections)
-      (when (cdr section-entry)
-        (setq has-tasks t)))
-
-    (when has-tasks
-      (let ((project-pos (org-asana--find-or-create-heading
-                         2 project-name section-start)))
-        (goto-char project-pos)
-
-        (dolist (section-entry sections)
-          (let* ((section-name (car section-entry))
-                 (tasks (cdr section-entry)))
-            ;; Only create section if it has tasks
-            (when tasks
-              (let ((section-pos (org-asana--find-or-create-heading
-                                 3 section-name project-pos)))
-                (goto-char section-pos)
-
-                (dolist (task tasks)
-                  (org-asana--update-or-create-task task section-pos batch-data))))))))))
 
 
 (defun org-asana--sync-done-tasks ()
@@ -945,40 +941,62 @@ Set to 1 to disable retries entirely."
     (dolist (task-info done-tasks)
       (org-asana--move-task-to-completed task-info))))
 
+(defun org-asana--extract-basic-fields (task)
+  "Extract basic fields from TASK."
+  (list :task-id (alist-get 'gid task)
+        :task-name (alist-get 'name task)
+        :completed (alist-get 'completed task)
+        :notes (alist-get 'notes task)
+        :modified-at (alist-get 'modified_at task)
+        :priority (alist-get 'priority task)
+        :tags (alist-get 'tags task)))
+
+(defun org-asana--extract-date-fields (task)
+  "Extract date-related fields from TASK."
+  (list :due-on (alist-get 'due_on task)
+        :due-at (alist-get 'due_at task)
+        :start-on (alist-get 'start_on task)
+        :start-at (alist-get 'start_at task)))
+
+(defun org-asana--extract-relationship-fields (task)
+  "Extract relationship fields from TASK."
+  (list :followers (alist-get 'followers task)
+        :parent (alist-get 'parent task)
+        :dependencies (alist-get 'dependencies task)
+        :dependents (alist-get 'dependents task)
+        :projects (mapcar (lambda (m) (alist-get 'project m))
+                         (alist-get 'memberships task))))
+
+(defun org-asana--extract-reaction-fields (task)
+  "Extract reaction fields from TASK."
+  (list :liked (alist-get 'liked task)
+        :num-likes (alist-get 'num_likes task)
+        :hearted (alist-get 'hearted task)
+        :num-hearts (alist-get 'num_hearts task)))
+
+(defun org-asana--format-permalink-url (task)
+  "Format permalink URL from TASK."
+  (let ((url (alist-get 'permalink_url task)))
+    (if (and url (string-prefix-p "/" url))
+        (concat "https://app.asana.com" url)
+      url)))
+
+(defun org-asana--extract-metadata-from-batch (task-id batch-data)
+  "Extract comments and attachments for TASK-ID from BATCH-DATA."
+  (let ((task-data (alist-get task-id batch-data)))
+    (list :comments (car task-data)
+          :attachments (cdr task-data))))
+
 (defun org-asana--extract-task-fields (task batch-data)
   "Extract and organize fields from TASK using BATCH-DATA."
-  (let* ((task-id (alist-get 'gid task))
-         (task-data (alist-get task-id batch-data))
-         (comments (car task-data))
-         (attachments (cdr task-data)))
-    (list :task-id task-id
-          :task-name (alist-get 'name task)
-          :completed (alist-get 'completed task)
-          :notes (alist-get 'notes task)
-          :due-on (alist-get 'due_on task)
-          :due-at (alist-get 'due_at task)
-          :start-on (alist-get 'start_on task)
-          :start-at (alist-get 'start_at task)
-          :modified-at (alist-get 'modified_at task)
-          :priority (alist-get 'priority task)
-          :tags (alist-get 'tags task)
-          :permalink-url (let ((url (alist-get 'permalink_url task)))
-                           (if (and url (string-prefix-p "/" url))
-                               (concat "https://app.asana.com" url)
-                             url))
-          :followers (alist-get 'followers task)
-          :parent (alist-get 'parent task)
-          :custom-fields (alist-get 'custom_fields task)
-          :dependencies (alist-get 'dependencies task)
-          :dependents (alist-get 'dependents task)
-          :liked (alist-get 'liked task)
-          :num-likes (alist-get 'num_likes task)
-          :hearted (alist-get 'hearted task)
-          :num-hearts (alist-get 'num_hearts task)
-          :projects (mapcar (lambda (m) (alist-get 'project m))
-                           (alist-get 'memberships task))
-          :comments comments
-          :attachments attachments)))
+  (let ((task-id (alist-get 'gid task)))
+    (append (org-asana--extract-basic-fields task)
+            (org-asana--extract-date-fields task)
+            (org-asana--extract-relationship-fields task)
+            (org-asana--extract-reaction-fields task)
+            (list :permalink-url (org-asana--format-permalink-url task)
+                  :custom-fields (alist-get 'custom_fields task))
+            (org-asana--extract-metadata-from-batch task-id batch-data))))
 
 (defun org-asana--apply-asana-updates (task-fields)
   "Apply TASK-FIELDS updates to current org entry."
@@ -1182,31 +1200,49 @@ Set to 1 to disable retries entirely."
   (org-asana--update-reactions-property task-fields)
   (org-asana--update-custom-fields-properties task-fields))
 
+(defun org-asana--extract-text-field-value (field)
+  "Extract text value from FIELD."
+  (alist-get 'text_value field))
+
+(defun org-asana--extract-number-field-value (field)
+  "Extract number value from FIELD as string."
+  (let ((num (alist-get 'number_value field)))
+    (when num (number-to-string num))))
+
+(defun org-asana--extract-enum-field-value (field)
+  "Extract enum value name from FIELD."
+  (let ((enum-val (alist-get 'enum_value field)))
+    (when enum-val (alist-get 'name enum-val))))
+
+(defun org-asana--extract-multi-enum-field-value (field)
+  "Extract multi-enum values from FIELD as comma-separated string."
+  (let ((values (alist-get 'multi_enum_values field)))
+    (when values
+      (mapconcat (lambda (v) (alist-get 'name v)) values ", "))))
+
+(defun org-asana--extract-date-field-value (field)
+  "Extract date value from FIELD."
+  (let ((date-val (alist-get 'date_value field)))
+    (when date-val
+      (or (alist-get 'date_time date-val)
+          (alist-get 'date date-val)))))
+
+(defun org-asana--extract-people-field-value (field)
+  "Extract people values from FIELD as comma-separated string."
+  (let ((people (alist-get 'people_value field)))
+    (when people
+      (mapconcat (lambda (p) (alist-get 'name p)) people ", "))))
+
 (defun org-asana--extract-custom-field-value (field)
   "Extract value from custom FIELD based on its type."
   (let ((field-type (alist-get 'type field)))
     (cond
-     ((string= field-type "text")
-      (alist-get 'text_value field))
-     ((string= field-type "number")
-      (let ((num (alist-get 'number_value field)))
-        (when num (number-to-string num))))
-     ((string= field-type "enum")
-      (let ((enum-val (alist-get 'enum_value field)))
-        (when enum-val (alist-get 'name enum-val))))
-     ((string= field-type "multi_enum")
-      (let ((values (alist-get 'multi_enum_values field)))
-        (when values
-          (mapconcat (lambda (v) (alist-get 'name v)) values ", "))))
-     ((string= field-type "date")
-      (let ((date-val (alist-get 'date_value field)))
-        (when date-val
-          (or (alist-get 'date_time date-val)
-              (alist-get 'date date-val)))))
-     ((string= field-type "people")
-      (let ((people (alist-get 'people_value field)))
-        (when people
-          (mapconcat (lambda (p) (alist-get 'name p)) people ", "))))
+     ((string= field-type "text") (org-asana--extract-text-field-value field))
+     ((string= field-type "number") (org-asana--extract-number-field-value field))
+     ((string= field-type "enum") (org-asana--extract-enum-field-value field))
+     ((string= field-type "multi_enum") (org-asana--extract-multi-enum-field-value field))
+     ((string= field-type "date") (org-asana--extract-date-field-value field))
+     ((string= field-type "people") (org-asana--extract-people-field-value field))
      (t (alist-get 'display_value field)))))
 
 (defun org-asana--update-existing-task (task-fields existing-pos)
@@ -1325,32 +1361,57 @@ Set to 1 to disable retries entirely."
     (insert (org-asana--format-attachments attachments))
     (insert (org-asana--format-comments comments))))
 
-(defun org-asana--extract-new-comments ()
-  "Extract new comments from Comments section that don't have GIDs."
+(defun org-asana--get-task-region ()
+  "Get start and end positions of current task."
   (save-excursion
     (org-back-to-heading t)
-    (let ((start (point))
-          (end (save-excursion (org-end-of-subtree t) (point)))
-          (new-comments '()))
+    (list :start (point)
+          :end (save-excursion (org-end-of-subtree t) (point)))))
+
+(defun org-asana--find-comments-section ()
+  "Find Comments section and return its boundaries."
+  (let ((region (org-asana--get-task-region)))
+    (save-excursion
+      (goto-char (plist-get region :start))
+      (when (re-search-forward "^\\*\\*\\*\\*\\* Comments$" 
+                               (plist-get region :end) t)
+        (list :start (point)
+              :end (save-excursion
+                     (if (re-search-forward "^\\*\\*\\*\\*\\* " 
+                                            (plist-get region :end) t)
+                         (match-beginning 0)
+                       (plist-get region :end))))))))
+
+(defun org-asana--has-comment-gid-p ()
+  "Check if current comment has a GID property."
+  (save-excursion
+    (forward-line)
+    (looking-at "  :PROPERTIES:")))
+
+(defun org-asana--extract-comment-text ()
+  "Extract comment text from current line."
+  (when (looking-at "^- \\(.+?\\): \\(.+\\)$")
+    (match-string 2)))
+
+(defun org-asana--collect-new-comments-in-region (start end)
+  "Collect new comments without GIDs between START and END."
+  (let ((new-comments '()))
+    (save-excursion
       (goto-char start)
-      (when (and (< (point) end)
-                 (re-search-forward "^\\*\\*\\*\\*\\* Comments$" end t))
-        (let ((comments-start (point))
-              (comments-end (save-excursion
-                             (if (re-search-forward "^\\*\\*\\*\\*\\* " end t)
-                                 (match-beginning 0)
-                               end))))
-          (goto-char comments-start)
-          ;; Look for comments without GID properties
-          (while (re-search-forward "^- \\(.+?\\): \\(.+\\)$" comments-end t)
-            (let ((text (match-string 2)))
-              ;; Check if this comment has a GID property
-              (save-excursion
-                (forward-line)
-                (unless (looking-at "  :PROPERTIES:")
-                  ;; This is a new comment without GID
-                  (push text new-comments)))))))
-      (nreverse new-comments))))
+      (while (re-search-forward "^- \\(.+?\\): \\(.+\\)$" end t)
+        (let ((text (match-string 2)))
+          (unless (org-asana--has-comment-gid-p)
+            (push text new-comments)))))
+    (nreverse new-comments)))
+
+(defun org-asana--extract-new-comments ()
+  "Extract new comments from Comments section that don't have GIDs."
+  (let ((comments-section (org-asana--find-comments-section)))
+    (if comments-section
+        (org-asana--collect-new-comments-in-region 
+         (plist-get comments-section :start)
+         (plist-get comments-section :end))
+      '())))
 
 (defun org-asana--add-comment-to-asana (task-id comment-text)
   "Add COMMENT-TEXT to TASK-ID in Asana."
@@ -1512,7 +1573,7 @@ Set to 1 to disable retries entirely."
 
 (defun org-asana--process-single-rich-task (task task-metadata)
   "Process a single rich TASK with TASK-METADATA."
-  (let* ((task-id (alist-get 'gid task))
+  (let* ((_ (alist-get 'gid task))
          (task-name (alist-get 'name task))
          (memberships (alist-get 'memberships task))
          (membership (car memberships))
@@ -1554,172 +1615,134 @@ Set to 1 to disable retries entirely."
           (when org-asana-debug
             (message "Failed to find/create task: %s" task-name)))))))
 
+(defun org-asana--extract-rich-task-data (task metadata)
+  "Extract task data from TASK and METADATA."
+  (list :task-id (alist-get 'gid task)
+        :due-on (alist-get 'due_on task)
+        :created-at (alist-get 'created_at task)
+        :modified-at (alist-get 'modified_at task)
+        :creator-name (alist-get 'name (alist-get 'created_by task))
+        :followers (alist-get 'followers task)
+        :notes (alist-get 'notes task)
+        :stories (car metadata)
+        :attachments (cdr metadata)))
+
+(defun org-asana--set-task-deadline-safe (due-on)
+  "Set task deadline to DUE-ON safely."
+  (when (and due-on (org-at-heading-p))
+    (condition-case nil
+        (org-deadline nil due-on)
+      (error
+       (when org-asana-debug
+         (message "Failed to set deadline: %s" due-on))))))
+
+(defun org-asana--set-basic-task-properties (task-data)
+  "Set basic properties from TASK-DATA."
+  (when (org-at-heading-p)
+    (when org-asana-debug
+      (message "Setting properties for task at heading: %s" 
+               (org-get-heading t t t t)))
+    (org-set-property "ASANA-TASK-GID" (plist-get task-data :task-id))
+    (when-let ((modified-at (plist-get task-data :modified-at)))
+      (org-set-property "ASANA-MODIFIED-AT" modified-at))
+    (when-let ((created-at (plist-get task-data :created-at)))
+      (when org-asana-debug
+        (message "Setting ASANA-CREATED-AT: %s" created-at))
+      (org-set-property "ASANA-CREATED-AT" created-at))
+    (when-let ((creator (plist-get task-data :creator-name)))
+      (org-set-property "ASANA-CREATED-BY" creator))))
+
+(defun org-asana--set-follower-property (followers)
+  "Set follower property from FOLLOWERS list."
+  (when (and followers (org-at-heading-p))
+    (let ((names (mapcar (lambda (f) (alist-get 'name f)) followers)))
+      (org-set-property "ASANA-FOLLOWERS" (string-join names ", ")))))
+
+(defun org-asana--add-task-metadata-notes (task-data)
+  "Add notes/comments from TASK-DATA if present."
+  (let ((stories (plist-get task-data :stories))
+        (attachments (plist-get task-data :attachments)))
+    (when (or stories attachments)
+      (let ((fields (list :notes (plist-get task-data :notes)
+                         :comments stories
+                         :attachments attachments)))
+        (org-asana--add-task-notes fields)))))
+
 (defun org-asana--update-rich-task-properties (task metadata)
   "Update task properties from rich TASK data and METADATA."
-  (let* ((task-id (alist-get 'gid task))
-         (due-on (alist-get 'due_on task))
-         (created-at (alist-get 'created_at task))
-         (modified-at (alist-get 'modified_at task))
-         (created-by (alist-get 'created_by task))
-         (creator-name (alist-get 'name created-by))
-         (followers (alist-get 'followers task))
-         (stories (car metadata))
-         (attachments (cdr metadata)))
-    
-    ;; Set deadline if present
-    (when (and due-on (org-at-heading-p))
-      (condition-case nil
-          (org-deadline nil due-on)
-        (error
-         (when org-asana-debug
-           (message "Failed to set deadline: %s" due-on)))))
-    
-    ;; Update properties
-    (when (org-at-heading-p)
-      (when org-asana-debug
-        (message "Setting properties for task at heading: %s" (org-get-heading t t t t)))
-      (org-set-property "ASANA-TASK-GID" task-id)
-      (when modified-at
-        (org-set-property "ASANA-MODIFIED-AT" modified-at))
-      (when created-at
-        (when org-asana-debug
-          (message "Setting ASANA-CREATED-AT: %s" created-at))
-        (org-set-property "ASANA-CREATED-AT" created-at))
-      (when creator-name
-        (org-set-property "ASANA-CREATED-BY" creator-name))
-      
-      ;; Add followers if present
-      (when followers
-        (let ((follower-names (mapcar (lambda (f) (alist-get 'name f)) followers)))
-          (org-set-property "ASANA-FOLLOWERS" (string-join follower-names ", "))))
-      
-      ;; Add notes/comments from stories and attachments (if we have metadata)
-      (when (and metadata (or stories attachments))
-        (let ((task-fields (list :notes (alist-get 'notes task)
-                                 :comments stories
-                                 :attachments attachments)))
-          (org-asana--add-task-notes task-fields))))))
+  (let ((task-data (org-asana--extract-rich-task-data task metadata)))
+    (org-asana--set-task-deadline-safe (plist-get task-data :due-on))
+    (org-asana--set-basic-task-properties task-data)
+    (org-asana--set-follower-property (plist-get task-data :followers))
+    (org-asana--add-task-metadata-notes task-data)))
 
-(defun org-asana--build-rich-task-tree (rich-tasks)
-  "Build task tree from rich task data."
-  (let ((tree '()))
-    (dolist (task rich-tasks)
-      (let* ((memberships (alist-get 'memberships task))
-             (membership (car memberships)) ; Take first membership
-             (project (alist-get 'project membership))
-             (section (alist-get 'section membership))
-             (project-gid (alist-get 'gid project))
-             (project-name (alist-get 'name project))
-             (section-gid (alist-get 'gid section))
-             (section-name (alist-get 'name section)))
-        (when (and project-name section-name)
-          (let* ((project-entry (assoc-string project-name tree)))
-            ;; Create project if doesn't exist
-            (unless project-entry
-              (setq project-entry (list project-name :gid project-gid))
-              (push project-entry tree))
-            ;; Find or create section
-            (let ((section-entry (assoc-string section-name (cddr project-entry))))
-              (unless section-entry
-                (setq section-entry (list section-name :gid section-gid :tasks nil))
-                (setcdr (cdr project-entry) (cons section-entry (cddr project-entry))))
-              ;; Add task to section's task list
-              (let ((tasks-cell (member :tasks section-entry)))
-                (when tasks-cell
-                  (setcar (cdr tasks-cell) (cons task (cadr tasks-cell))))))))))
-    ;; TODO: Add sorting back after fixing data structure issues
-    tree))
 
-(defun org-asana--process-rich-project-sections (project-entry section-start task-metadata)
-  "Process PROJECT-ENTRY sections with rich task data."
-  (let* ((project-name (car project-entry))
-         (project-data (cdr project-entry))
-         (project-gid (if (eq (car project-data) :gid)
-                          (cadr project-data)
-                        nil))
-         (sections (if (eq (car project-data) :gid)
-                       (cddr project-data)
-                     project-data))
-         (project-pos (org-asana--find-or-create-project-by-gid project-gid project-name)))
-    (when project-pos
-      ;; Add project GID property
-      (save-excursion
-        (goto-char project-pos)
-        (org-set-property "ASANA-PROJECT-GID" project-gid))
-      (when org-asana-debug
-        (message "Processing project '%s' (GID: %s) at pos %s with %d sections"
-                 project-name project-gid project-pos (length sections)))
-      (dolist (section-entry sections)
-        (let* ((section-name (car section-entry))
-               (section-plist (cdr section-entry))
-               (section-gid (plist-get section-plist :gid))
-               (section-tasks (plist-get section-plist :tasks)))
-          (when org-asana-debug
-            (message "Processing section '%s' (GID: %s) with %d tasks"
-                     section-name section-gid (length section-tasks)))
-          (when section-tasks
-            (let ((section-pos (org-asana--find-or-create-section-by-gid section-gid section-name project-pos)))
-              (when section-pos
-                ;; Add section GID property
-                (save-excursion
-                  (goto-char section-pos)
-                  (org-set-property "ASANA-SECTION-GID" section-gid))
-                (when org-asana-debug
-                  (message "Section '%s' created/found at pos %s" section-name section-pos))
-                ;; Process each task in the section
-                (dolist (task section-tasks)
-                  (condition-case err
-                      (org-asana--process-rich-single-task task task-metadata section-pos)
-                    (error
-                     (message "Error processing task: %s" (error-message-string err))
-                     (when org-asana-debug
-                       (message "Task data: %S" task)))))))))))))
+(defun org-asana--should-process-task-p (task)
+  "Check if TASK should be processed (not completed)."
+  (org-asana--json-false-p (alist-get 'completed task)))
+
+(defun org-asana--extract-task-metadata (task-gid task-metadata)
+  "Extract metadata for TASK-GID from TASK-METADATA."
+  (let ((entry (assoc task-gid task-metadata)))
+    (when entry
+      (list :stories (cadr entry)
+            :attachments (cddr entry)))))
+
+(defun org-asana--find-or-create-task-heading (task-gid task-name section-pos)
+  "Find existing task by TASK-GID or create new heading with TASK-NAME at SECTION-POS."
+  (or (org-asana--find-task-by-gid task-gid section-pos)
+      (org-asana--create-task-heading 
+       (org-asana--strip-org-links task-name) section-pos)))
+
+(defun org-asana--format-task-heading-with-link (task-fields)
+  "Format task heading with permalink from TASK-FIELDS."
+  (let* ((raw-name (plist-get task-fields :task-name))
+         (clean-name (org-asana--strip-org-links raw-name))
+         (permalink (plist-get task-fields :permalink-url)))
+    (if (string-match "\\[\\[.*\\]\\]" raw-name)
+        raw-name  ; Already linked
+      (if (and permalink (not (string-empty-p permalink)))
+          (format "[[%s][%s]]" permalink clean-name)
+        clean-name))))
+
+(defun org-asana--set-new-task-deadline (task-fields)
+  "Set deadline for new task from TASK-FIELDS."
+  (let ((due-on (plist-get task-fields :due-on)))
+    (when (and due-on (not (org-asana--json-null-p due-on))
+               (org-at-heading-p))
+      (org-deadline nil (concat "<" due-on ">")))))
+
+(defun org-asana--initialize-new-task (task-fields)
+  "Initialize new task with TASK-FIELDS."
+  (org-edit-headline (org-asana--format-task-heading-with-link task-fields))
+  (org-asana--set-new-task-deadline task-fields)
+  (org-asana--update-task-properties task-fields)
+  (org-asana--add-task-notes task-fields))
+
+(defun org-asana--process-task-at-position (task-fields existing-pos)
+  "Process task with TASK-FIELDS at position, updating if EXISTING-POS."
+  (if existing-pos
+      (org-asana--update-rich-task task-fields)
+    (org-asana--initialize-new-task task-fields)))
 
 (defun org-asana--process-rich-single-task (task task-metadata section-pos)
   "Process single rich TASK with TASK-METADATA at SECTION-POS."
   (unless section-pos
     (error "org-asana--process-rich-single-task: section-pos is nil"))
-  ;; Skip completed tasks
-  (when (org-asana--json-false-p (alist-get 'completed task))
+  (when (org-asana--should-process-task-p task)
     (let* ((task-gid (alist-get 'gid task))
            (task-name (alist-get 'name task))
-           (clean-task-name (org-asana--strip-org-links task-name))
-         (metadata-entry (assoc task-gid task-metadata))
-         (stories (when metadata-entry (cadr metadata-entry)))
-         (attachments (when metadata-entry (cddr metadata-entry)))
-         (task-fields (org-asana--extract-rich-task-fields task stories attachments))
-         ;; First try to find existing task by GID
-         (existing-pos (org-asana--find-task-by-gid task-gid section-pos))
-         (heading-pos (or existing-pos
-                         (org-asana--create-task-heading clean-task-name section-pos))))
+           (metadata (org-asana--extract-task-metadata task-gid task-metadata))
+           (task-fields (org-asana--extract-rich-task-fields 
+                        task (plist-get metadata :stories) 
+                        (plist-get metadata :attachments)))
+           (existing-pos (org-asana--find-task-by-gid task-gid section-pos))
+           (heading-pos (org-asana--find-or-create-task-heading 
+                        task-gid task-name section-pos)))
       (when heading-pos
         (save-excursion
           (goto-char heading-pos)
-          ;; Only update if this is an existing task
-          (when existing-pos
-            (org-asana--update-rich-task task-fields))
-          ;; For new tasks, set properties and format
-          (unless existing-pos
-            ;; Update the heading with URL if not already linked
-            (let* ((raw-task-name (plist-get task-fields :task-name))
-                   (clean-task-name (org-asana--strip-org-links raw-task-name))
-                   (permalink-url (plist-get task-fields :permalink-url))
-                   ;; Only create link if the name doesn't already have one
-                   (linked-name (if (string-match "\\[\\[.*\\]\\]" raw-task-name)
-                                   raw-task-name  ; Already has links, use as-is
-                                 (if (and permalink-url (not (string-empty-p permalink-url)))
-                                     (format "[[%s][%s]]" permalink-url clean-task-name)
-                                   clean-task-name))))
-              (org-edit-headline linked-name))
-            ;; Set deadline if present
-            (let ((due-on (plist-get task-fields :due-on)))
-              (when (and due-on (not (org-asana--json-null-p due-on)))
-                (when (org-at-heading-p)
-                  (org-deadline nil (concat "<" due-on ">")))))
-            ;; Set properties
-            (org-asana--update-task-properties task-fields)
-            ;; Add notes
-            (org-asana--add-task-notes task-fields)))))))
+          (org-asana--process-task-at-position task-fields existing-pos))))))
 
 (defun org-asana--extract-rich-task-fields (task stories attachments)
   "Extract task fields from rich TASK data with STORIES and ATTACHMENTS."
@@ -1789,32 +1812,46 @@ Set to 1 to disable retries entirely."
             :priority priority
             :tags tags))))
 
+(defun org-asana--format-date-for-api (date-string)
+  "Format DATE-STRING to YYYY-MM-DD for Asana API."
+  (when date-string
+    (format-time-string "%Y-%m-%d" 
+                       (org-time-string-to-time date-string))))
+
+(defun org-asana--get-sync-priority (priority)
+  "Get Asana priority value if PRIORITY sync is enabled."
+  (when (and org-asana-sync-priority priority)
+    (org-asana--get-asana-priority priority)))
+
+(defun org-asana--build-basic-update-data (org-task-data)
+  "Build basic update data from ORG-TASK-DATA."
+  (let ((heading (plist-get org-task-data :heading))
+        (body (plist-get org-task-data :body))
+        (completed (plist-get org-task-data :completed)))
+    `((name . ,(org-asana--strip-org-links heading))
+      (notes . ,body)
+      (completed . ,(if completed t :false)))))
+
+(defun org-asana--build-date-update-data (org-task-data)
+  "Build date-related update data from ORG-TASK-DATA."
+  (let ((due-date (org-asana--format-date-for-api 
+                   (plist-get org-task-data :deadline)))
+        (start-date (org-asana--format-date-for-api 
+                     (plist-get org-task-data :scheduled))))
+    (append (when due-date `((due_on . ,due-date)))
+            (when start-date `((start_on . ,start-date))))))
+
+(defun org-asana--build-priority-update-data (org-task-data)
+  "Build priority update data from ORG-TASK-DATA."
+  (let ((priority (org-asana--get-sync-priority 
+                   (plist-get org-task-data :priority))))
+    (when priority `((priority . ,priority)))))
+
 (defun org-asana--build-asana-update-data (org-task-data)
   "Build Asana API update data from ORG-TASK-DATA."
-  (let* ((heading (plist-get org-task-data :heading))
-         (completed (plist-get org-task-data :completed))
-         (deadline (plist-get org-task-data :deadline))
-         (scheduled (plist-get org-task-data :scheduled))
-         (body (plist-get org-task-data :body))
-         (priority (plist-get org-task-data :priority))
-         (_tags (plist-get org-task-data :tags))
-         (due-date (when deadline
-                    (format-time-string
-                     "%Y-%m-%d"
-                     (org-time-string-to-time deadline))))
-         (start-date (when scheduled
-                      (format-time-string
-                       "%Y-%m-%d"
-                       (org-time-string-to-time scheduled))))
-         (asana-priority (when (and org-asana-sync-priority priority)
-                          (org-asana--get-asana-priority priority))))
-
-    `((data . ((name . ,(org-asana--strip-org-links heading))
-              (notes . ,body)
-              (completed . ,(if completed t :false))
-              ,@(when due-date `((due_on . ,due-date)))
-              ,@(when start-date `((start_on . ,start-date)))
-              ,@(when asana-priority `((priority . ,asana-priority))))))))
+  `((data . ,(append (org-asana--build-basic-update-data org-task-data)
+                     (org-asana--build-date-update-data org-task-data)
+                     (org-asana--build-priority-update-data org-task-data)))))
 
 (defun org-asana--send-task-update (task-id update-data)
   "Send UPDATE-DATA for TASK-ID to Asana API."
@@ -1835,15 +1872,6 @@ Set to 1 to disable retries entirely."
         (org-asana--sync-tags-to-asana task-id (plist-get org-task-data :tags))
         (org-asana--sync-new-comments)))))
 
-(defun org-asana--sync-to-asana ()
-  "Sync local changes to Asana."
-  (save-excursion
-    (let ((region (org-asana--find-active-tasks-region)))
-      (when region
-        (goto-char (car region))
-        (let ((active-end (cdr region)))
-          (while (re-search-forward "^\\*\\{4\\} \\(TODO\\|DONE\\) " active-end t)
-            (org-asana--sync-single-task)))))))
 
 ;;; Data Transformation Functions
 
@@ -1851,21 +1879,11 @@ Set to 1 to disable retries entirely."
   "Check if VALUE represents JSON null."
   (or (eq value :null) (eq value nil)))
 
-(defun org-asana--format-timestamp (timestamp)
-  "Format TIMESTAMP to readable string."
-  (if timestamp
-      (format-time-string "%Y-%m-%d %H:%M" timestamp)
-    ""))
 
 (defun org-asana--calculate-retry-delay (attempt)
   "Calculate exponential backoff delay for ATTEMPT."
   (* attempt attempt 2))
 
-(defun org-asana--validate-response (response)
-  "Validate API RESPONSE structure."
-  (and response
-       (listp response)
-       (alist-get 'data response)))
 
 (defun org-asana--strip-org-links (text)
   "Strip org-mode links from TEXT, returning only the display text.
@@ -1938,10 +1956,6 @@ Converts [[url][display]] to display, [[url]] to url."
   (when asana-tags
     (concat ":" (mapconcat (lambda (tag) (alist-get 'name tag)) asana-tags ":") ":")))
 
-(defun org-asana--parse-org-tags (tags-string)
-  "Parse org TAGS-STRING to list of tag names."
-  (when (and tags-string (not (string-empty-p tags-string)))
-    (split-string (substring tags-string 1 -1) ":")))
 
 (defun org-asana--compare-timestamps (org-time asana-time-str)
   "Compare ORG-TIME with ASANA-TIME-STR, return t if org is newer."
@@ -2201,22 +2215,6 @@ Uses org-map-entries for robust subtree boundary handling."
   nil)
 
 
-(defun org-asana--cleanup-empty-subtrees (pattern end-pos)
-  "Remove empty subtrees matching PATTERN before END-POS."
-  (save-excursion
-    (goto-char (point-min))
-    (let ((search-start (point)))
-      (while (and (< (point) end-pos)
-                  (re-search-forward pattern end-pos t))
-        (let ((start (match-beginning 0)))
-          (if (org-asana--subtree-empty-p start pattern)
-              (progn
-                (org-asana--remove-subtree start)
-                ;; After removal, go back to search-start to avoid missing entries
-                (goto-char search-start))
-            ;; Move past this subtree if not empty
-            (goto-char start)
-            (org-end-of-subtree t)))))))
 
 (defun org-asana--subtree-empty-p (start pattern)
   "Check if subtree at START has children matching PATTERN."
@@ -2294,12 +2292,6 @@ Uses org-map-entries for robust subtree boundary handling."
           (insert stars " " title
                   (if (string-empty-p indicator) "" (concat " " indicator))))))))
 
-(defun org-asana--remove-progress-indicators ()
-  "Remove all progress indicators from buffer."
-  (save-excursion
-    (goto-char (point-min))
-    (while (re-search-forward " \\[[0-9]+/[0-9]+\\]" nil t)
-      (replace-match ""))))
 
 ;;; Capture Templates
 
