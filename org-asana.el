@@ -1285,6 +1285,10 @@ Set to 1 to disable retries entirely."
   (let ((notes (plist-get task-fields :notes))
         (comments (plist-get task-fields :comments))
         (attachments (plist-get task-fields :attachments)))
+    (when org-asana-debug
+      (message "Adding notes - comments: %s attachments: %s" 
+               (if comments "yes" "no")
+               (if attachments "yes" "no")))
     (org-end-of-meta-data t)
     ;; Remove old metadata sections before adding new ones
     (org-asana--remove-metadata-sections)
@@ -1537,6 +1541,8 @@ Set to 1 to disable retries entirely."
 
 (defun org-asana--process-rich-single-task (task task-metadata task-pos)
   "Process single rich TASK with TASK-METADATA at TASK-POS."
+  (unless task-pos
+    (error "org-asana--process-rich-single-task: task-pos is nil"))
   (let* ((task-gid (alist-get 'gid task))
          (task-name (alist-get 'name task))
          (clean-task-name (org-asana--strip-org-links task-name))
@@ -1546,8 +1552,9 @@ Set to 1 to disable retries entirely."
          (task-fields (org-asana--extract-rich-task-fields task stories attachments))
          ;; Find or create task heading
          (heading-pos (org-asana--find-or-create-heading 4 clean-task-name task-pos)))
-    (goto-char heading-pos)
-    (org-asana--update-rich-task task-fields)))
+    (when heading-pos
+      (goto-char heading-pos)
+      (org-asana--update-rich-task task-fields))))
 
 (defun org-asana--extract-rich-task-fields (task stories attachments)
   "Extract task fields from rich TASK data with STORIES and ATTACHMENTS."
@@ -1957,10 +1964,18 @@ Uses org-map-entries for robust subtree boundary handling."
   (save-excursion
     (goto-char (point-min))
     (when (re-search-forward "^\\* Active Projects$" nil t)
-      (while (re-search-forward pattern end-pos t)
-        (let ((start (match-beginning 0)))
-          (when (org-asana--subtree-empty-p start pattern)
-            (org-asana--remove-subtree start)))))))
+      (let ((search-start (point)))
+        (while (and (< (point) end-pos)
+                    (re-search-forward pattern end-pos t))
+          (let ((start (match-beginning 0)))
+            (if (org-asana--subtree-empty-p start pattern)
+                (progn
+                  (org-asana--remove-subtree start)
+                  ;; After removal, go back to search-start to avoid missing entries
+                  (goto-char search-start))
+              ;; Move past this subtree if not empty
+              (goto-char start)
+              (org-end-of-subtree t))))))))
 
 (defun org-asana--subtree-empty-p (start pattern)
   "Check if subtree at START has children matching PATTERN."
