@@ -17,7 +17,7 @@
 
 ;; Author: William Theesfeld <william@theesfeld.net>
 ;; Version: 2.0.0
-;; Package-Requires: ((emacs "27.1") (json "1.5") (url "0"))
+;; Package-Requires: ((emacs "30.1"))
 ;; Keywords: tools, asana, org-mode, productivity
 ;; URL: https://github.com/username/org-asana
 
@@ -40,7 +40,6 @@
 (require 'org)
 (require 'json)
 (require 'url)
-(require 'subr-x)
 
 ;;; Custom Faces
 
@@ -140,7 +139,8 @@
     (with-current-buffer (url-retrieve-synchronously url t t)
       (goto-char (point-min))
       (re-search-forward "^$")
-      (let ((response (json-read)))
+      (let ((json-array-type 'list)
+            (response (json-read)))
         (kill-buffer)
         (sleep-for org-asana-rate-limit-delay)
         response))))
@@ -638,8 +638,8 @@
                            ("ASANA-CREATED-BY" . ,(plist-get props :created-by))
                            ("ASANA-ASSIGNEE" . ,(plist-get props :assignee))
                            ("ASANA-STATUS" . ,(plist-get props :assignee-status))
-                           ("ASANA-FOLLOWERS" . ,(when followers (string-join followers ", ")))
-                           ("ASANA-TAGS" . ,(when tags (string-join tags ", ")))
+                           ("ASANA-FOLLOWERS" . ,(when followers (mapconcat #'identity followers ", ")))
+                           ("ASANA-TAGS" . ,(when tags (mapconcat #'identity tags ", ")))
                            ("ASANA-LIKES" . ,(format "%d" (or (plist-get props :num-likes) 0)))
                            ("ASANA-PERMALINK" . ,(plist-get props :permalink)))
               :deadline (plist-get props :due-on)
@@ -671,7 +671,7 @@
                 (date (org-asana--format-timestamp (alist-get 'created_at story))))
             (push (format "- %s (%s): %s" author date text) body-parts)))))
     (when body-parts
-      (string-join (nreverse body-parts) "\n"))))
+      (mapconcat #'identity (nreverse body-parts) "\n"))))
 
 (defun org-asana--validate-token ()
   "Validate the Asana token is configured."
