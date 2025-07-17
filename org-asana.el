@@ -1266,10 +1266,12 @@ Set to 1 to disable retries entirely."
       ;; Remove each metadata section
       (dolist (section '("***** Comments" "***** Attachments" "***** Activity History"))
         (goto-char start)
-        (when (re-search-forward (concat "^" (regexp-quote section) "$") end t)
+        (when (and (< (point) end)
+                   (re-search-forward (concat "^" (regexp-quote section) "$") end t))
           (let ((section-start (match-beginning 0))
                 (section-end (save-excursion
-                              (if (re-search-forward "^\\*\\*\\*\\*\\* " end t)
+                              (if (and (< (point) end)
+                                       (re-search-forward "^\\*\\*\\*\\*\\* " end t))
                                   (match-beginning 0)
                                 (goto-char end)
                                 ;; Skip trailing newlines
@@ -1300,7 +1302,8 @@ Set to 1 to disable retries entirely."
           (end (save-excursion (org-end-of-subtree t) (point)))
           (new-comments '()))
       (goto-char start)
-      (when (re-search-forward "^\\*\\*\\*\\*\\* Comments$" end t)
+      (when (and (< (point) end)
+                 (re-search-forward "^\\*\\*\\*\\*\\* Comments$" end t))
         (let ((comments-start (point))
               (comments-end (save-excursion
                              (if (re-search-forward "^\\*\\*\\*\\*\\* " end t)
@@ -1378,8 +1381,8 @@ Set to 1 to disable retries entirely."
 (defun org-asana--fetch-all-task-data ()
   "Fetch all task data in single comprehensive call."
   (let* ((workspace-info (org-asana--get-workspace-info))
-         (workspace-gid (car workspace-info))
-         (user-gid (cadr workspace-info))
+         (user-gid (car workspace-info))
+         (workspace-gid (cadr workspace-info))
          (opt-fields "gid,name,notes,completed,due_on,due_at,start_on,start_at,modified_at,priority,tags.gid,tags.name,memberships.project.gid,memberships.project.name,memberships.section.name,permalink_url,followers.gid,followers.name,parent.gid,parent.name,custom_fields,dependencies.gid,dependencies.name,dependents.gid,dependents.name")
          (opt-expand "assignee,projects,followers,memberships.project,memberships.section"))
     (org-asana--fetch-paginated
@@ -1839,7 +1842,8 @@ Uses org-map-entries for robust subtree boundary handling."
                          (org-end-of-subtree t)
                          (point)))
            (metadata-start (save-excursion
-                            (when (re-search-forward "^\\*\\{5\\} " subtree-end t)
+                            (when (and (< (point) subtree-end)
+                                      (re-search-forward "^\\*\\{5\\} " subtree-end t))
                               (line-beginning-position))))
            (end (or metadata-start subtree-end)))
       (string-trim (buffer-substring-no-properties start end)))))
