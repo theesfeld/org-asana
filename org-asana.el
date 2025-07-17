@@ -40,6 +40,15 @@
 (require 'org)
 (require 'json)
 (require 'url)
+(require 'cl-lib)
+
+;;; Error Conditions
+
+(define-error 'org-asana-error "Org-Asana error")
+(define-error 'org-asana-auth-error "Authentication failed" 'org-asana-error)
+(define-error 'org-asana-rate-limit-error "Rate limit exceeded" 'org-asana-error)
+(define-error 'org-asana-sync-error "Sync operation failed" 'org-asana-error)
+(define-error 'org-asana-api-error "API request failed" 'org-asana-error)
 
 ;;; Custom Faces
 
@@ -48,7 +57,7 @@
   "Face for high priority tasks."
   :group 'org-asana)
 
-(defface org-asana-priority-medium  
+(defface org-asana-priority-medium
   '((t :foreground "orange"))
   "Face for medium priority tasks."
   :group 'org-asana)
@@ -100,6 +109,21 @@
   :type 'boolean
   :group 'org-asana)
 
+(defcustom org-asana-enable-save-hook t
+  "Whether to enable automatic sync on save."
+  :type 'boolean
+  :group 'org-asana)
+
+(defcustom org-asana-enable-todo-hook t
+  "Whether to sync when TODO state changes."
+  :type 'boolean
+  :group 'org-asana)
+
+(defcustom org-asana-enable-agenda-integration t
+  "Whether to add org-asana file to agenda files."
+  :type 'boolean
+  :group 'org-asana)
+
 ;;; Constants
 
 (defconst org-asana-api-base-url "https://app.asana.com/api/1.0"
@@ -114,6 +138,588 @@
 (defvar org-asana--rate-limit-reset nil
   "Time when rate limit resets.")
 
+(defvar org-asana--initialized nil
+  "Whether org-asana has been initialized.")
+
+;;; Data Storage - Hash Tables
+
+(defvar org-asana--projects-table nil
+  "Hash table storing all projects by GID.")
+
+(defvar org-asana--sections-table nil
+  "Hash table storing all sections by GID.")
+
+(defvar org-asana--tasks-table nil
+  "Hash table storing all tasks by GID.")
+
+(defun org-asana--create-projects-table ()
+  "Create and return a new projects hash table."
+  (make-hash-table :test 'equal :size 50))
+
+(defun org-asana--create-sections-table ()
+  "Create and return a new sections hash table."
+  (make-hash-table :test 'equal :size 200))
+
+(defun org-asana--create-tasks-table ()
+  "Create and return a new tasks hash table."
+  (make-hash-table :test 'equal :size 1000))
+
+(defun org-asana--clear-all-tables ()
+  "Clear all data storage tables."
+  (setq org-asana--projects-table (org-asana--create-projects-table))
+  (setq org-asana--sections-table (org-asana--create-sections-table))
+  (setq org-asana--tasks-table (org-asana--create-tasks-table)))
+
+;;; Project Storage Functions
+
+(defun org-asana--store-project (project)
+  "Store PROJECT in projects table."
+  (puthash (alist-get 'gid project) project org-asana--projects-table))
+
+(defun org-asana--get-project (gid)
+  "Get project by GID."
+  (gethash gid org-asana--projects-table))
+
+(defun org-asana--get-all-projects ()
+  "Get all projects as a list."
+  (hash-table-values org-asana--projects-table))
+
+(defun org-asana--project-name (gid)
+  "Get name of project with GID."
+  (alist-get 'name (org-asana--get-project gid)))
+
+(defun org-asana--project-exists-p (gid)
+  "Return t if project with GID exists."
+  (gethash gid org-asana--projects-table nil))
+
+;;; Section Storage Functions
+
+(defun org-asana--store-section (section)
+  "Store SECTION in sections table."
+  (puthash (alist-get 'gid section) section org-asana--sections-table))
+
+(defun org-asana--get-section (gid)
+  "Get section by GID."
+  (gethash gid org-asana--sections-table))
+
+(defun org-asana--get-all-sections ()
+  "Get all sections as a list."
+  (hash-table-values org-asana--sections-table))
+
+(defun org-asana--section-name (gid)
+  "Get name of section with GID."
+  (alist-get 'name (org-asana--get-section gid)))
+
+(defun org-asana--section-project-gid (gid)
+  "Get project GID for section with GID."
+  (alist-get 'project (org-asana--get-section gid)))
+
+;;; Task Storage Functions
+
+(defun org-asana--store-task (task)
+  "Store TASK in tasks table."
+  (puthash (alist-get 'gid task) task org-asana--tasks-table))
+
+(defun org-asana--get-task (gid)
+  "Get task by GID."
+  (gethash gid org-asana--tasks-table))
+
+(defun org-asana--get-all-tasks ()
+  "Get all tasks as a list."
+  (hash-table-values org-asana--tasks-table))
+
+(defun org-asana--task-name (gid)
+  "Get name of task with GID."
+  (alist-get 'name (org-asana--get-task gid)))
+
+(defun org-asana--task-completed-p (gid)
+  "Return t if task with GID is completed."
+  (alist-get 'completed (org-asana--get-task gid)))
+
+(defun org-asana--task-project-gids (gid)
+  "Get list of project GIDs for task with GID."
+  (let* ((task (org-asana--get-task gid))
+         (memberships (alist-get 'memberships task)))
+    (mapcar (lambda (m)
+              (alist-get 'gid (alist-get 'project m)))
+            (if (vectorp memberships)
+                (append memberships nil)
+              memberships))))
+
+(defun org-asana--task-section-gids (gid)
+  "Get list of section GIDs for task with GID."
+  (let* ((task (org-asana--get-task gid))
+         (memberships (alist-get 'memberships task)))
+    (mapcar (lambda (m)
+              (alist-get 'gid (alist-get 'section m)))
+            (if (vectorp memberships)
+                (append memberships nil)
+              memberships))))
+
+;;; Cross-Reference Functions
+
+(defun org-asana--project-sections (project-gid)
+  "Get all sections for PROJECT-GID."
+  (seq-filter (lambda (section)
+                (equal project-gid
+                       (alist-get 'gid (alist-get 'project section))))
+              (org-asana--get-all-sections)))
+
+(defun org-asana--section-tasks (section-gid)
+  "Get all tasks in SECTION-GID."
+  (seq-filter (lambda (task)
+                (member section-gid (org-asana--task-section-gids
+                                   (alist-get 'gid task))))
+              (org-asana--get-all-tasks)))
+
+(defun org-asana--project-tasks (project-gid)
+  "Get all tasks in PROJECT-GID."
+  (seq-filter (lambda (task)
+                (member project-gid (org-asana--task-project-gids
+                                   (alist-get 'gid task))))
+              (org-asana--get-all-tasks)))
+
+;;; Sorting Functions
+
+(defun org-asana--sort-by-name (items)
+  "Sort ITEMS by name field."
+  (sort items (lambda (a b)
+                (string< (or (alist-get 'name a) "")
+                        (or (alist-get 'name b) "")))))
+
+(defun org-asana--sort-by-due-date (tasks)
+  "Sort TASKS by due date."
+  (sort tasks (lambda (a b)
+                (let ((date-a (alist-get 'due_on a))
+                      (date-b (alist-get 'due_on b)))
+                  (cond
+                   ((and date-a date-b) (string< date-a date-b))
+                   (date-a t)
+                   (t nil))))))
+
+(defun org-asana--sort-by-created-date (items)
+  "Sort ITEMS by created date."
+  (sort items (lambda (a b)
+                (string< (or (alist-get 'created_at a) "")
+                        (or (alist-get 'created_at b) "")))))
+
+(defun org-asana--sort-by-modified-date (items)
+  "Sort ITEMS by modified date."
+  (sort items (lambda (a b)
+                (string> (or (alist-get 'modified_at a) "")
+                        (or (alist-get 'modified_at b) "")))))
+
+;;; Data Loading Functions
+
+(defun org-asana--populate-from-tasks (tasks)
+  "Populate all hash tables from TASKS list."
+  (org-asana--clear-all-tables)
+  (dolist (task tasks)
+    (org-asana--process-task-memberships task)
+    (org-asana--store-task task)))
+
+(defun org-asana--process-task-memberships (task)
+  "Process and store projects/sections from TASK memberships."
+  (let ((memberships (alist-get 'memberships task)))
+    (dolist (membership (if (vectorp memberships)
+                           (append memberships nil)
+                         memberships))
+      (org-asana--process-membership-project membership)
+      (org-asana--process-membership-section membership))))
+
+(defun org-asana--process-membership-project (membership)
+  "Process and store project from MEMBERSHIP."
+  (let ((project (alist-get 'project membership)))
+    (when (and project (alist-get 'gid project))
+      (unless (org-asana--project-exists-p (alist-get 'gid project))
+        (org-asana--store-project project)))))
+
+(defun org-asana--process-membership-section (membership)
+  "Process and store section from MEMBERSHIP."
+  (let ((section (alist-get 'section membership))
+        (project (alist-get 'project membership)))
+    (when (and section (alist-get 'gid section))
+      (unless (org-asana--get-section (alist-get 'gid section))
+        (let ((section-with-project (cons (cons 'project project) section)))
+          (org-asana--store-section section-with-project))))))
+
+;;; Tree Building Functions Using Hash Tables
+
+(defun org-asana--build-org-tree-from-tables (metadata-map)
+  "Build org tree using data from hash tables with METADATA-MAP."
+  (let ((projects (org-asana--sort-by-name (org-asana--get-all-projects))))
+    (mapcar (lambda (project)
+              (org-asana--create-project-node-from-tables
+               project 1 (or metadata-map (make-hash-table :test 'equal))))
+            projects)))
+
+(defun org-asana--create-project-node-from-tables (project level metadata-map)
+  "Create project node from PROJECT at LEVEL with METADATA-MAP."
+  (let* ((project-gid (alist-get 'gid project))
+         (sections (org-asana--sort-by-name
+                   (org-asana--project-sections project-gid))))
+    (list :level level
+          :title (alist-get 'name project)
+          :properties `(("ASANA-PROJECT-GID" . ,project-gid))
+          :children (mapcar (lambda (section)
+                             (org-asana--create-section-node-from-tables
+                              section (1+ level) metadata-map))
+                           sections))))
+
+(defun org-asana--create-section-node-from-tables (section level metadata-map)
+  "Create section node from SECTION at LEVEL with METADATA-MAP."
+  (let* ((section-gid (alist-get 'gid section))
+         (tasks (org-asana--sort-by-created-date
+                (org-asana--section-tasks section-gid))))
+    (list :level level
+          :title (alist-get 'name section)
+          :properties `(("ASANA-SECTION-GID" . ,section-gid))
+          :children (mapcar (lambda (task)
+                             (org-asana--create-task-node-from-tables
+                              task (1+ level) metadata-map))
+                           tasks))))
+
+(defun org-asana--create-task-node-from-tables (task level metadata-map)
+  "Create task node from TASK at LEVEL with METADATA-MAP."
+  (let* ((task-gid (alist-get 'gid task))
+         (metadata (gethash task-gid metadata-map))
+         (properties (org-asana--task-to-properties task metadata))
+         (body-text (org-asana--format-task-body task metadata))
+         (task-title (org-asana--format-task-title task)))
+    (list :level level
+          :title task-title
+          :properties (org-asana--plist-to-alist properties)
+          :body body-text)))
+
+(defun org-asana--format-task-title (task)
+  "Format TASK title with section prefix."
+  (let* ((task-gid (alist-get 'gid task))
+         (task-name (alist-get 'name task))
+         (section-gids (org-asana--task-section-gids task-gid))
+         (section-name (when section-gids
+                        (org-asana--section-name (car section-gids)))))
+    (if section-name
+        (format "[%s] %s" section-name task-name)
+      task-name)))
+
+
+;;; Org File Loading Functions
+
+(defvar org-asana--org-projects-table nil
+  "Hash table storing projects from org file.")
+
+(defvar org-asana--org-sections-table nil
+  "Hash table storing sections from org file.")
+
+(defvar org-asana--org-tasks-table nil
+  "Hash table storing tasks from org file.")
+
+(defun org-asana--create-org-data-tables ()
+  "Create hash tables for org file data."
+  (setq org-asana--org-projects-table (make-hash-table :test 'equal :size 50))
+  (setq org-asana--org-sections-table (make-hash-table :test 'equal :size 200))
+  (setq org-asana--org-tasks-table (make-hash-table :test 'equal :size 1000)))
+
+(defun org-asana--load-org-file-to-tables ()
+  "Load existing org file data into hash tables."
+  (org-asana--create-org-data-tables)
+  (when (file-exists-p org-asana-org-file)
+    (with-current-buffer (find-file-noselect org-asana-org-file)
+      (org-map-entries #'org-asana--process-org-entry))))
+
+(defun org-asana--process-org-entry ()
+  "Process current org entry and store in appropriate table."
+  (let ((props (org-entry-properties)))
+    (cond
+     ((assoc "ASANA-PROJECT-GID" props)
+      (org-asana--store-org-project props))
+     ((assoc "ASANA-SECTION-GID" props)
+      (org-asana--store-org-section props))
+     ((assoc "ASANA-TASK-GID" props)
+      (org-asana--store-org-task props)))))
+
+(defun org-asana--store-org-project (props)
+  "Store project from PROPS in org projects table."
+  (let* ((gid (cdr (assoc "ASANA-PROJECT-GID" props)))
+         (title (org-get-heading t t t t))
+         (project `((gid . ,gid) (name . ,title))))
+    (puthash gid project org-asana--org-projects-table)))
+
+(defun org-asana--store-org-section (props)
+  "Store section from PROPS in org sections table."
+  (let* ((gid (cdr (assoc "ASANA-SECTION-GID" props)))
+         (title (org-get-heading t t t t))
+         (section `((gid . ,gid) (name . ,title))))
+    (puthash gid section org-asana--org-sections-table)))
+
+(defun org-asana--store-org-task (props)
+  "Store task from PROPS in org tasks table."
+  (let* ((gid (cdr (assoc "ASANA-TASK-GID" props)))
+         (title (org-get-heading t t t t))
+         (todo-state (org-get-todo-state))
+         (completed (equal todo-state "DONE"))
+         (modified-at (cdr (assoc "ASANA-MODIFIED-AT" props)))
+         (task `((gid . ,gid)
+                 (name . ,title)
+                 (completed . ,completed)
+                 (modified_at . ,modified-at))))
+    (puthash gid task org-asana--org-tasks-table)))
+
+;;; Comparison Functions
+
+(defun org-asana--task-modified-p (task-gid)
+  "Check if task with TASK-GID has been modified."
+  (let ((org-task (gethash task-gid org-asana--org-tasks-table))
+        (api-task (gethash task-gid org-asana--tasks-table)))
+    (and org-task api-task
+         (string> (alist-get 'modified_at api-task)
+                  (alist-get 'modified_at org-task)))))
+
+(defun org-asana--task-completed-locally-p (task-gid)
+  "Check if task with TASK-GID was completed locally."
+  (let ((org-task (gethash task-gid org-asana--org-tasks-table)))
+    (and org-task (alist-get 'completed org-task))))
+
+(defun org-asana--find-new-tasks ()
+  "Find tasks that exist in API but not in org file."
+  (let ((new-tasks '()))
+    (maphash (lambda (gid task)
+               (unless (gethash gid org-asana--org-tasks-table)
+                 (push task new-tasks)))
+             org-asana--tasks-table)
+    new-tasks))
+
+(defun org-asana--find-deleted-tasks ()
+  "Find tasks that exist in org file but not in API."
+  (let ((deleted-tasks '()))
+    (maphash (lambda (gid _task)
+               (unless (gethash gid org-asana--tasks-table)
+                 (push gid deleted-tasks)))
+             org-asana--org-tasks-table)
+    deleted-tasks))
+
+;;; Bidirectional Sync Functions
+
+(defun org-asana--sync-bidirectional ()
+  "Perform bidirectional sync between org and Asana."
+  (message "Starting bidirectional sync...")
+  (let* ((tasks-raw (org-asana--fetch-all-tasks))
+         (tasks (org-asana--ensure-list tasks-raw)))
+    (org-asana--populate-from-tasks tasks)
+    (org-asana--load-org-file-to-tables)
+    (org-asana--process-sync-changes)
+    (org-asana--rebuild-org-file)))
+
+(defun org-asana--process-sync-changes ()
+  "Process all sync changes between org and API."
+  (org-asana--handle-new-tasks)
+  (org-asana--handle-deleted-tasks)
+  (org-asana--handle-modified-tasks)
+  (org-asana--handle-completed-tasks))
+
+(defun org-asana--handle-new-tasks ()
+  "Handle tasks that are new from API."
+  (let ((new-tasks (org-asana--find-new-tasks)))
+    (when new-tasks
+      (message "Found %d new tasks from Asana" (length new-tasks)))))
+
+(defun org-asana--handle-deleted-tasks ()
+  "Handle tasks that were deleted in API."
+  (let ((deleted-tasks (org-asana--find-deleted-tasks)))
+    (when deleted-tasks
+      (message "Found %d tasks to remove" (length deleted-tasks)))))
+
+(defun org-asana--handle-modified-tasks ()
+  "Handle tasks that were modified in API."
+  (let ((modified-count 0))
+    (maphash (lambda (gid _task)
+               (when (org-asana--task-modified-p gid)
+                 (cl-incf modified-count)))
+             org-asana--tasks-table)
+    (when (> modified-count 0)
+      (message "Found %d modified tasks" modified-count))))
+
+(defun org-asana--handle-completed-tasks ()
+  "Handle tasks completed locally that need sync to Asana."
+  (let ((completed-locally '()))
+    (maphash (lambda (gid org-task)
+               (let ((api-task (gethash gid org-asana--tasks-table)))
+                 (when (and api-task
+                           (alist-get 'completed org-task)
+                           (not (alist-get 'completed api-task)))
+                   (push gid completed-locally))))
+             org-asana--org-tasks-table)
+    (when completed-locally
+      (message "Found %d tasks to mark complete in Asana"
+               (length completed-locally))
+      (dolist (gid completed-locally)
+        (org-asana--mark-task-complete gid)))))
+
+(defun org-asana--rebuild-org-file ()
+  "Rebuild org file from updated hash tables."
+  (let* ((metadata-map (when org-asana-fetch-metadata
+                         (org-asana--fetch-all-metadata (org-asana--get-all-tasks))))
+         (org-tree (org-asana--build-org-tree-from-tables metadata-map))
+         (buffer (org-asana--prepare-buffer)))
+    (org-asana--render-org-tree org-tree buffer)
+    (with-current-buffer buffer
+      (org-asana--update-progress-indicators)
+      (when (and (boundp 'org-asana-apply-faces) org-asana-apply-faces)
+        (org-asana--apply-task-faces))
+      (save-buffer))))
+
+;;; API Update Functions
+
+(defun org-asana--mark-task-complete (task-gid)
+  "Mark task with TASK-GID as complete in Asana."
+  (org-asana--make-request
+   "PUT"
+   (format "/tasks/%s" task-gid)
+   '((completed . t))))
+
+;;; Display and Query Functions
+
+(defun org-asana--display-all-projects ()
+  "Display all projects in a temporary buffer."
+  (interactive)
+  (let ((projects (org-asana--sort-by-name (org-asana--get-all-projects)))
+        (buffer (get-buffer-create "*Asana Projects*")))
+    (with-current-buffer buffer
+      (erase-buffer)
+      (insert "Asana Projects\n")
+      (insert "==============\n\n")
+      (dolist (project projects)
+        (org-asana--insert-project-summary project))
+      (goto-char (point-min))
+      (view-mode))
+    (display-buffer buffer)))
+
+(defun org-asana--insert-project-summary (project)
+  "Insert summary of PROJECT at point."
+  (let* ((gid (alist-get 'gid project))
+         (name (alist-get 'name project))
+         (task-count (length (org-asana--project-tasks gid)))
+         (section-count (length (org-asana--project-sections gid))))
+    (insert (format "* %s\n" name))
+    (insert (format "  GID: %s\n" gid))
+    (insert (format "  Sections: %d\n" section-count))
+    (insert (format "  Tasks: %d\n\n" task-count))))
+
+(defun org-asana--display-tasks-by-due-date ()
+  "Display all tasks sorted by due date."
+  (interactive)
+  (let ((tasks (org-asana--sort-by-due-date (org-asana--get-all-tasks)))
+        (buffer (get-buffer-create "*Asana Tasks by Due Date*")))
+    (with-current-buffer buffer
+      (erase-buffer)
+      (org-mode)
+      (insert "#+TITLE: Asana Tasks by Due Date\n\n")
+      (dolist (task tasks)
+        (org-asana--insert-task-with-context task))
+      (goto-char (point-min)))
+    (display-buffer buffer)))
+
+(defun org-asana--extract-task-context (task)
+  "Extract context information from TASK."
+  (let ((gid (alist-get 'gid task)))
+    (list :gid gid
+          :name (alist-get 'name task)
+          :due-date (alist-get 'due_on task)
+          :project-gids (org-asana--task-project-gids gid)
+          :section-gids (org-asana--task-section-gids gid))))
+
+(defun org-asana--format-context-names (gids name-fn)
+  "Format GIDS using NAME-FN to get names."
+  (mapconcat name-fn gids ", "))
+
+(defun org-asana--insert-task-heading (name)
+  "Insert task heading with NAME."
+  (insert (format "* %s\n" name)))
+
+(defun org-asana--insert-task-deadline (due-date)
+  "Insert task DEADLINE if DUE-DATE exists."
+  (when due-date
+    (insert (format "  DEADLINE: <%s>\n" due-date))))
+
+(defun org-asana--insert-context-line (label gids name-fn)
+  "Insert context line with LABEL and GIDS using NAME-FN."
+  (when gids
+    (insert (format "  %s: %s\n" label
+                    (org-asana--format-context-names gids name-fn)))))
+
+(defun org-asana--insert-task-with-context (task)
+  "Insert TASK with project/section context."
+  (let ((context (org-asana--extract-task-context task)))
+    (org-asana--insert-task-heading (plist-get context :name))
+    (org-asana--insert-task-deadline (plist-get context :due-date))
+    (org-asana--insert-context-line "Projects"
+                                   (plist-get context :project-gids)
+                                   #'org-asana--project-name)
+    (org-asana--insert-context-line "Sections"
+                                   (plist-get context :section-gids)
+                                   #'org-asana--section-name)
+    (insert "\n")))
+
+(defun org-asana--find-tasks-by-keyword (keyword)
+  "Find all tasks containing KEYWORD in name or notes."
+  (interactive "sSearch keyword: ")
+  (let ((matching-tasks '()))
+    (maphash (lambda (_gid task)
+               (when (or (string-match-p keyword (or (alist-get 'name task) ""))
+                        (string-match-p keyword (or (alist-get 'notes task) "")))
+                 (push task matching-tasks)))
+             org-asana--tasks-table)
+    (org-asana--display-search-results keyword matching-tasks)))
+
+(defun org-asana--display-search-results (keyword tasks)
+  "Display search results for KEYWORD with TASKS."
+  (let ((buffer (get-buffer-create "*Asana Search Results*")))
+    (with-current-buffer buffer
+      (erase-buffer)
+      (org-mode)
+      (insert (format "#+TITLE: Search Results for '%s'\n\n" keyword))
+      (insert (format "Found %d matching tasks\n\n" (length tasks)))
+      (dolist (task (org-asana--sort-by-name tasks))
+        (org-asana--insert-task-with-context task))
+      (goto-char (point-min)))
+    (display-buffer buffer)))
+
+(defun org-asana--count-table-entries ()
+  "Count entries in all hash tables."
+  (list :tasks (hash-table-count org-asana--tasks-table)
+        :projects (hash-table-count org-asana--projects-table)
+        :sections (hash-table-count org-asana--sections-table)))
+
+(defun org-asana--count-task-dates ()
+  "Count tasks with due dates and overdue tasks."
+  (let ((with-dates 0)
+        (overdue 0)
+        (today (format-time-string "%Y-%m-%d")))
+    (maphash (lambda (_gid task)
+               (let ((due-date (alist-get 'due_on task)))
+                 (when due-date
+                   (cl-incf with-dates)
+                   (when (string< due-date today)
+                     (cl-incf overdue)))))
+             org-asana--tasks-table)
+    (list :with-dates with-dates :overdue overdue)))
+
+(defun org-asana--format-statistics (counts dates)
+  "Format statistics message from COUNTS and DATES."
+  (format "Asana Statistics: %d projects, %d sections, %d tasks (%d with due dates, %d overdue)"
+          (plist-get counts :projects)
+          (plist-get counts :sections)
+          (plist-get counts :tasks)
+          (plist-get dates :with-dates)
+          (plist-get dates :overdue)))
+
+(defun org-asana--statistics ()
+  "Display Asana workspace statistics."
+  (interactive)
+  (let ((counts (org-asana--count-table-entries))
+        (dates (org-asana--count-task-dates)))
+    (message "%s" (org-asana--format-statistics counts dates))))
+
 ;;; API Request Functions
 
 (defun org-asana--check-rate-limit ()
@@ -125,25 +731,51 @@
       (message "Rate limit low. Waiting %.1f seconds..." wait-time)
       (sleep-for wait-time))))
 
+(defun org-asana--build-request-headers ()
+  "Build request headers with authentication."
+  `(("Authorization" . ,(concat "Bearer " org-asana-token))
+    ("Content-Type" . "application/json")))
+
+(defun org-asana--build-request-url (endpoint)
+  "Build full request URL from ENDPOINT."
+  (concat org-asana-api-base-url endpoint))
+
+(defun org-asana--parse-api-response (buffer)
+  "Parse API response from BUFFER."
+  (with-current-buffer buffer
+    (goto-char (point-min))
+    (re-search-forward "^$")
+    (let ((json-array-type 'list))
+      (json-read))))
+
+(defun org-asana--execute-http-request (url method headers data)
+  "Execute HTTP request to URL with METHOD, HEADERS and DATA."
+  (let ((url-request-method method)
+        (url-request-extra-headers headers)
+        (url-request-data (when data (json-encode data))))
+    (url-retrieve-synchronously url t t)))
+
 (defun org-asana--make-request (method endpoint &optional data)
   "Make an API request to METHOD ENDPOINT with optional DATA."
   (unless org-asana-token
-    (error "No Asana token configured. Set `org-asana-token'"))
+    (signal 'org-asana-auth-error '("No Asana token configured. Set `org-asana-token'")))
   (org-asana--check-rate-limit)
-  (let* ((url (concat org-asana-api-base-url endpoint))
-         (url-request-method method)
-         (url-request-extra-headers
-          `(("Authorization" . ,(concat "Bearer " org-asana-token))
-            ("Content-Type" . "application/json")))
-         (url-request-data (when data (json-encode data))))
-    (with-current-buffer (url-retrieve-synchronously url t t)
-      (goto-char (point-min))
-      (re-search-forward "^$")
-      (let ((json-array-type 'list)
-            (response (json-read)))
-        (kill-buffer)
-        (sleep-for org-asana-rate-limit-delay)
-        response))))
+  (let* ((url (org-asana--build-request-url endpoint))
+         (headers (org-asana--build-request-headers))
+         (buffer nil))
+    (condition-case err
+        (progn
+          (setq buffer (org-asana--execute-http-request url method headers data))
+          (if (buffer-live-p buffer)
+              (unwind-protect
+                  (prog1 (org-asana--parse-api-response buffer)
+                    (sleep-for org-asana-rate-limit-delay))
+                (kill-buffer buffer))
+            (signal 'org-asana-api-error '("Failed to retrieve response"))))
+      (error
+       (when (buffer-live-p buffer)
+         (kill-buffer buffer))
+       (signal 'org-asana-api-error (list (error-message-string err)))))))
 
 (defun org-asana--fetch-paginated (endpoint)
   "Fetch all pages of data from ENDPOINT."
@@ -152,7 +784,7 @@
         (first-request t))
     (catch 'done
       (while t
-        (let* ((url (if first-request 
+        (let* ((url (if first-request
                        endpoint
                        (alist-get 'path next-path)))
                (response (org-asana--make-request "GET" url)))
@@ -194,8 +826,8 @@
 (defun org-asana--fetch-task-metadata (task-id)
   "Fetch stories and attachments for TASK-ID."
   (when org-asana-fetch-metadata
-    (let ((stories (org-asana--make-request 
-                   "GET" 
+    (let ((stories (org-asana--make-request
+                   "GET"
                    (format "/tasks/%s/stories" task-id)))
           (attachments (org-asana--make-request
                        "GET"
@@ -205,75 +837,6 @@
 
 ;;; Data Transformation Functions
 
-(defun org-asana--group-tasks-by-project (tasks)
-  "Group TASKS by their project membership."
-  (let ((projects (make-hash-table :test 'equal))
-        (task-list (if (vectorp tasks) (append tasks nil) tasks)))
-    (dolist (task task-list)
-      (let* ((memberships (alist-get 'memberships task))
-             (membership-list (if (vectorp memberships) 
-                                 (append memberships nil) 
-                               memberships))
-             (membership (car membership-list))
-             (project (alist-get 'project membership))
-             (project-gid (alist-get 'gid project)))
-        (when project-gid
-          (let ((project-tasks (gethash project-gid projects)))
-            (puthash project-gid (cons task project-tasks) projects)))))
-    projects))
-
-(defun org-asana--group-tasks-by-section (project-tasks)
-  "Group PROJECT-TASKS by their section."
-  (let ((sections (make-hash-table :test 'equal)))
-    (dolist (task project-tasks)
-      (let* ((memberships (alist-get 'memberships task))
-             (membership (car memberships))
-             (section (alist-get 'section membership))
-             (section-gid (alist-get 'gid section)))
-        (when section-gid
-          (let ((section-tasks (gethash section-gid sections)))
-            (puthash section-gid (cons task section-tasks) sections)))))
-    sections))
-
-(defun org-asana--extract-unique-projects (tasks)
-  "Extract unique project data from TASKS."
-  (let ((projects (make-hash-table :test 'equal))
-        (result '())
-        (task-list (if (vectorp tasks) (append tasks nil) tasks)))
-    (dolist (task task-list)
-      (let* ((memberships (alist-get 'memberships task))
-             (membership-list (if (vectorp memberships)
-                                 (append memberships nil)
-                               memberships))
-             (membership (car membership-list))
-             (project (alist-get 'project membership))
-             (project-gid (alist-get 'gid project)))
-        (when (and project-gid (not (gethash project-gid projects)))
-          (puthash project-gid t projects)
-          (push project result))))
-    (nreverse result)))
-
-(defun org-asana--extract-sections-for-project (tasks project-gid)
-  "Extract unique sections for PROJECT-GID from TASKS."
-  (let ((sections (make-hash-table :test 'equal))
-        (result '())
-        (task-list (if (vectorp tasks) (append tasks nil) tasks)))
-    (dolist (task task-list)
-      (let* ((memberships (alist-get 'memberships task))
-             (membership-list (if (vectorp memberships)
-                                 (append memberships nil)
-                               memberships))
-             (membership (car membership-list))
-             (project (alist-get 'project membership))
-             (section (alist-get 'section membership))
-             (task-project-gid (alist-get 'gid project))
-             (section-gid (alist-get 'gid section)))
-        (when (and (equal task-project-gid project-gid)
-                   section-gid
-                   (not (gethash section-gid sections)))
-          (puthash section-gid t sections)
-          (push section result))))
-    (nreverse result)))
 
 (defun org-asana--format-timestamp (timestamp)
   "Format Asana TIMESTAMP to Org date format."
@@ -289,182 +852,111 @@
 
 (defun org-asana--sanitize-text (text)
   "Sanitize TEXT for safe inclusion in Org files."
-  (when text
-    (let ((sanitized text))
-      (setq sanitized (replace-regexp-in-string "\\*" "\\\\*" sanitized))
-      (setq sanitized (replace-regexp-in-string "\\[\\[.*?\\]\\[\\(.*?\\)\\]\\]" "\\1" sanitized))
-      sanitized)))
+  (save-match-data
+    (when text
+      (let ((sanitized text))
+        (setq sanitized (replace-regexp-in-string "\\*" "\\\\*" sanitized))
+        (setq sanitized (replace-regexp-in-string "\\[\\[.*?\\]\\[\\(.*?\\)\\]\\]" "\\1" sanitized))
+        sanitized))))
 
-(defun org-asana--clean-notes (notes)
-  "Clean NOTES field from org-mode corruption."
-  (when notes
-    (let ((cleaned notes))
-      ;; Remove org properties blocks
-      (setq cleaned (replace-regexp-in-string ":PROPERTIES:[^:]*:END:[\n\r]*" "" cleaned))
-      ;; Remove TODO keywords
-      (setq cleaned (replace-regexp-in-string "^\\(?:TODO\\|DONE\\|ODO\\) " "" cleaned))
-      ;; Remove deadline lines
+(defun org-asana--remove-org-properties (text)
+  "Remove org properties blocks from TEXT."
+  (save-match-data
+    (replace-regexp-in-string ":PROPERTIES:[^:]*:END:[\n\r]*" "" text)))
+
+(defun org-asana--remove-org-keywords (text)
+  "Remove TODO/DONE keywords from TEXT."
+  (save-match-data
+    (replace-regexp-in-string "^\\(?:TODO\\|DONE\\|ODO\\) " "" text)))
+
+(defun org-asana--clean-org-links (text)
+  "Clean and extract text from org links in TEXT."
+  (save-match-data
+    (let ((cleaned text))
+      (setq cleaned (replace-regexp-in-string
+                     "\\[\\[https?://[^]]+\\]\\[\\([^]]+\\)\\]\\]" "\\1" cleaned))
+      (setq cleaned (replace-regexp-in-string
+                     "/[0-9]+/[0-9]+/[^]]*\\]\\[\\([^]]+\\)\\]\\]" "\\1" cleaned))
+      cleaned)))
+
+(defun org-asana--remove-org-metadata (text)
+  "Remove deadlines, headings, and property lines from TEXT."
+  (save-match-data
+    (let ((cleaned text))
       (setq cleaned (replace-regexp-in-string "^DEADLINE: <[^>]+>[\n\r]*" "" cleaned))
-      ;; Extract text from org links
-      (setq cleaned (replace-regexp-in-string "\\[\\[https?://[^]]+\\]\\[\\([^]]+\\)\\]\\]" "\\1" cleaned))
-      ;; Remove broken links
-      (setq cleaned (replace-regexp-in-string "/[0-9]+/[0-9]+/[^]]*\\]\\[\\([^]]+\\)\\]\\]" "\\1" cleaned))
-      ;; Remove org headings
       (setq cleaned (replace-regexp-in-string "^\\*+ " "" cleaned))
-      ;; Remove property lines
       (setq cleaned (replace-regexp-in-string "^:[A-Z_]+: .*[\n\r]*" "" cleaned))
-      ;; Clean up whitespace
-      (setq cleaned (replace-regexp-in-string "[\n\r]+" "\n" cleaned))
+      cleaned)))
+
+(defun org-asana--normalize-whitespace (text)
+  "Normalize whitespace in TEXT."
+  (save-match-data
+    (let ((cleaned (replace-regexp-in-string "[\n\r]+" "\n" text)))
       (setq cleaned (string-trim cleaned))
       (if (string-empty-p cleaned) nil cleaned))))
 
-(defun org-asana--task-to-properties (task metadata)
-  "Convert TASK and METADATA to property list."
-  (let ((stories (car metadata))
-        (attachments (cdr metadata))
-        (followers (alist-get 'followers task)))
-    (list :gid (alist-get 'gid task)
-          :name (org-asana--sanitize-text (alist-get 'name task))
-          :notes (org-asana--clean-notes (alist-get 'notes task))
-          :due-on (org-asana--format-date (alist-get 'due_on task))
-          :start-on (org-asana--format-date (alist-get 'start_on task))
-          :created-at (org-asana--format-timestamp (alist-get 'created_at task))
-          :modified-at (org-asana--format-timestamp (alist-get 'modified_at task))
-          :created-by (alist-get 'name (alist-get 'created_by task))
+(defun org-asana--clean-notes (notes)
+  "Clean NOTES field from org-mode corruption."
+  (save-match-data
+    (when notes
+      (thread-first notes
+        (org-asana--remove-org-properties)
+        (org-asana--remove-org-keywords)
+        (org-asana--clean-org-links)
+        (org-asana--remove-org-metadata)
+        (org-asana--normalize-whitespace)))))
+
+(defun org-asana--ensure-list (obj)
+  "Ensure OBJ is a list, converting from vector if needed."
+  (if (vectorp obj) (append obj nil) obj))
+
+(defun org-asana--extract-basic-properties (task)
+  "Extract basic properties from TASK."
+  (list :gid (alist-get 'gid task)
+        :name (org-asana--sanitize-text (alist-get 'name task))
+        :notes (org-asana--clean-notes (alist-get 'notes task))
+        :permalink (alist-get 'permalink_url task)
+        :parent (alist-get 'name (alist-get 'parent task))
+        :num-subtasks (alist-get 'num_subtasks task)))
+
+(defun org-asana--extract-date-properties (task)
+  "Extract and format date properties from TASK."
+  (list :due-on (org-asana--format-date (alist-get 'due_on task))
+        :start-on (org-asana--format-date (alist-get 'start_on task))
+        :created-at (org-asana--format-timestamp (alist-get 'created_at task))
+        :modified-at (org-asana--format-timestamp (alist-get 'modified_at task))))
+
+(defun org-asana--extract-people-properties (task)
+  "Extract people-related properties from TASK."
+  (let ((followers (alist-get 'followers task)))
+    (list :created-by (alist-get 'name (alist-get 'created_by task))
           :assignee (alist-get 'name (alist-get 'assignee task))
           :assignee-status (alist-get 'assignee_status task)
-          :followers (mapcar (lambda (f) (alist-get 'name f)) 
-                            (if (vectorp followers) (append followers nil) followers))
-          :num-likes (alist-get 'num_likes task)
-          :tags (mapcar (lambda (tag) (alist-get 'name tag))
-                       (let ((tags (alist-get 'tags task)))
-                         (if (vectorp tags) (append tags nil) tags)))
-          :permalink (alist-get 'permalink_url task)
-          :parent (alist-get 'name (alist-get 'parent task))
-          :num-subtasks (alist-get 'num_subtasks task)
-          :stories stories
-          :attachments attachments)))
+          :followers (mapcar (lambda (f) (alist-get 'name f))
+                           (org-asana--ensure-list followers))
+          :num-likes (alist-get 'num_likes task))))
+
+(defun org-asana--extract-tag-properties (task)
+  "Extract tag properties from TASK."
+  (let ((tags (alist-get 'tags task)))
+    (list :tags (mapcar (lambda (tag) (alist-get 'name tag))
+                       (org-asana--ensure-list tags)))))
+
+(defun org-asana--extract-metadata-properties (metadata)
+  "Extract metadata properties from METADATA."
+  (list :stories (car metadata)
+        :attachments (cdr metadata)))
+
+(defun org-asana--task-to-properties (task metadata)
+  "Convert TASK and METADATA to property list."
+  (append (org-asana--extract-basic-properties task)
+          (org-asana--extract-date-properties task)
+          (org-asana--extract-people-properties task)
+          (org-asana--extract-tag-properties task)
+          (org-asana--extract-metadata-properties metadata)))
 
 ;;; Org Tree Building Functions
 
-(defun org-asana--build-project-tree (tasks)
-  "Build hierarchical tree structure from flat TASKS list."
-  (let ((tree '()))
-    (dolist (project (org-asana--extract-unique-projects tasks))
-      (let* ((project-gid (alist-get 'gid project))
-             (project-name (alist-get 'name project))
-             (project-sections (org-asana--build-sections-tree tasks project-gid)))
-        (push (list :type 'project
-                    :gid project-gid
-                    :name project-name
-                    :children project-sections)
-              tree)))
-    (nreverse tree)))
-
-(defun org-asana--build-sections-tree (tasks project-gid)
-  "Build sections tree for PROJECT-GID from TASKS."
-  (let ((sections '()))
-    (dolist (section (org-asana--extract-sections-for-project tasks project-gid))
-      (let* ((section-gid (alist-get 'gid section))
-             (section-name (alist-get 'name section))
-             (section-tasks (org-asana--sort-tasks-by-created-date 
-                           (org-asana--get-tasks-for-section tasks project-gid section-gid))))
-        (push (list :type 'section
-                    :gid section-gid
-                    :name section-name
-                    :children section-tasks
-                    :oldest-task-date (org-asana--get-oldest-task-date section-tasks))
-              sections)))
-    ;; Sort sections by oldest task date
-    (sort sections
-          (lambda (a b)
-            (let ((date-a (plist-get a :oldest-task-date))
-                  (date-b (plist-get b :oldest-task-date)))
-              (string< (or date-a "") (or date-b "")))))))
-
-(defun org-asana--get-oldest-task-date (task-items)
-  "Get the oldest created_at date from TASK-ITEMS."
-  (let ((oldest-date nil))
-    (dolist (item task-items)
-      (let* ((task (plist-get item :data))
-             (date (alist-get 'created_at task)))
-        (when (and date (or (null oldest-date) (string< date oldest-date)))
-          (setq oldest-date date))))
-    oldest-date))
-
-(defun org-asana--sort-tasks-by-created-date (task-items)
-  "Sort TASK-ITEMS by creation date, oldest first."
-  (sort task-items
-        (lambda (a b)
-          (let* ((task-a (plist-get a :data))
-                 (task-b (plist-get b :data))
-                 (date-a (alist-get 'created_at task-a))
-                 (date-b (alist-get 'created_at task-b)))
-            (string< (or date-a "") (or date-b ""))))))
-
-(defun org-asana--get-tasks-for-section (tasks project-gid section-gid)
-  "Get tasks for PROJECT-GID and SECTION-GID from TASKS."
-  (let ((section-tasks '())
-        (task-list (if (vectorp tasks) (append tasks nil) tasks)))
-    (dolist (task task-list)
-      (let* ((memberships (alist-get 'memberships task))
-             (membership-list (if (vectorp memberships)
-                                 (append memberships nil)
-                               memberships))
-             (membership (car membership-list))
-             (project (alist-get 'project membership))
-             (section (alist-get 'section membership))
-             (task-project-gid (alist-get 'gid project))
-             (task-section-gid (alist-get 'gid section)))
-        (when (and (equal task-project-gid project-gid)
-                   (equal task-section-gid section-gid))
-          (push (list :type 'task
-                      :gid (alist-get 'gid task)
-                      :name (alist-get 'name task)
-                      :data task)
-                section-tasks))))
-    (nreverse section-tasks)))
-
-(defun org-asana--create-org-node (item level)
-  "Create org node from ITEM at LEVEL."
-  (let ((type (plist-get item :type)))
-    (cond
-     ((eq type 'project)
-      (list :level level
-            :title (plist-get item :name)
-            :properties `(("ASANA-PROJECT-GID" . ,(plist-get item :gid)))
-            :children (mapcar (lambda (child)
-                               (org-asana--create-org-node child (1+ level)))
-                             (plist-get item :children))))
-     ((eq type 'section)
-      (list :level level
-            :title (plist-get item :name)
-            :properties `(("ASANA-SECTION-GID" . ,(plist-get item :gid)))
-            :children (mapcar (lambda (child)
-                               (org-asana--create-org-node child (1+ level)))
-                             (plist-get item :children))))
-     ((eq type 'task)
-      (let* ((task-data (plist-get item :data))
-             (props (org-asana--task-to-properties task-data nil)))
-        (list :level level
-              :title (plist-get props :name)
-              :todo-keyword "TODO"
-              :properties `(("ASANA-TASK-GID" . ,(plist-get props :gid))
-                           ("ASANA-CREATED-AT" . ,(plist-get props :created-at))
-                           ("ASANA-MODIFIED-AT" . ,(plist-get props :modified-at))
-                           ("ASANA-CREATED-BY" . ,(plist-get props :created-by))
-                           ("ASANA-ASSIGNEE" . ,(plist-get props :assignee))
-                           ("ASANA-PERMALINK" . ,(plist-get props :permalink)))
-              :deadline (plist-get props :due-on)
-              :scheduled (plist-get props :start-on)
-              :body (plist-get props :notes)))))))
-
-(defun org-asana--build-org-tree (tasks)
-  "Build complete org tree structure from TASKS."
-  (let ((project-tree (org-asana--build-project-tree tasks)))
-    (mapcar (lambda (project)
-             (org-asana--create-org-node project 1))
-           project-tree)))
 
 ;;; Rendering Functions
 
@@ -478,27 +970,42 @@
       (org-asana--render-node node))
     (goto-char (point-min))))
 
+(defun org-asana--extract-node-data (node)
+  "Extract all data from NODE into a plist."
+  (list :level (plist-get node :level)
+        :title (plist-get node :title)
+        :todo-keyword (plist-get node :todo-keyword)
+        :properties (plist-get node :properties)
+        :deadline (plist-get node :deadline)
+        :scheduled (plist-get node :scheduled)
+        :body (plist-get node :body)
+        :children (plist-get node :children)))
+
+(defun org-asana--render-node-content (data)
+  "Render node content from DATA plist."
+  (org-asana--insert-heading
+   (plist-get data :level)
+   (plist-get data :title)
+   (plist-get data :todo-keyword))
+  (when (plist-get data :deadline)
+    (org-asana--insert-deadline (plist-get data :deadline)))
+  (when (plist-get data :scheduled)
+    (org-asana--insert-scheduled (plist-get data :scheduled)))
+  (when (plist-get data :properties)
+    (org-asana--insert-properties (plist-get data :properties)))
+  (when (plist-get data :body)
+    (org-asana--insert-body (plist-get data :body))))
+
+(defun org-asana--render-children (children)
+  "Render all CHILDREN nodes."
+  (dolist (child children)
+    (org-asana--render-node child)))
+
 (defun org-asana--render-node (node)
   "Render NODE to current buffer."
-  (let ((level (plist-get node :level))
-        (title (plist-get node :title))
-        (todo-keyword (plist-get node :todo-keyword))
-        (properties (plist-get node :properties))
-        (deadline (plist-get node :deadline))
-        (scheduled (plist-get node :scheduled))
-        (body (plist-get node :body))
-        (children (plist-get node :children)))
-    (org-asana--insert-heading level title todo-keyword)
-    (when deadline
-      (org-asana--insert-deadline deadline))
-    (when scheduled
-      (org-asana--insert-scheduled scheduled))
-    (when properties
-      (org-asana--insert-properties properties))
-    (when body
-      (org-asana--insert-body body))
-    (dolist (child children)
-      (org-asana--render-node child))))
+  (let ((data (org-asana--extract-node-data node)))
+    (org-asana--render-node-content data)
+    (org-asana--render-children (plist-get data :children))))
 
 (defun org-asana--insert-heading (level title &optional todo-keyword)
   "Insert heading at LEVEL with TITLE and optional TODO-KEYWORD."
@@ -531,28 +1038,84 @@
   (when (and body (not (string-empty-p body)))
     (insert "\n" body "\n")))
 
+(defun org-asana--count-subtask-progress ()
+  "Count DONE and total tasks under current heading."
+  (let ((done 0)
+        (total 0))
+    (save-excursion
+      (save-restriction
+        (org-narrow-to-subtree)
+        (goto-char (point-min))
+        (while (re-search-forward "^\\*\\{4,\\} \\(TODO\\|DONE\\)" nil t)
+          (setq total (1+ total))
+          (when (string= (match-string 1) "DONE")
+            (setq done (1+ done))))))
+    (cons done total)))
+
+(defun org-asana--update-single-progress-indicator ()
+  "Update progress indicator at point."
+  (let ((stars (match-string 1))
+        (title (match-string 2))
+        (progress (org-asana--count-subtask-progress)))
+    (replace-match
+     (format "%s %s [%d/%d]" stars title (car progress) (cdr progress))
+     t t)))
+
+(defun org-asana--progress-indicator-regex ()
+  "Return regex for matching progress indicators."
+  "^\\(\\*\\{2,3\\}\\) \\(.+?\\) \\[\\(/\\|[0-9]+/[0-9]+\\)\\]")
+
 (defun org-asana--update-progress-indicators ()
   "Update progress indicators for all headings."
   (when org-asana-show-progress-indicators
     (save-excursion
-      (goto-char (point-min))
-      ;; Match level 2 and 3 headings with [/] or [x/y]
-      (while (re-search-forward "^\\(\\*\\{2,3\\}\\) \\(.+?\\) \\[\\(/\\|[0-9]+/[0-9]+\\)\\]" nil t)
-        (let ((stars (match-string 1))
-              (title (match-string 2))
-              (done 0)
-              (total 0))
-          (save-excursion
-            (org-narrow-to-subtree)
-            (goto-char (point-min))
-            ;; Count TODO and DONE tasks under this heading
-            (while (re-search-forward "^\\*\\{4,\\} \\(TODO\\|DONE\\)" nil t)
-              (setq total (1+ total))
-              (when (string= (match-string 1) "DONE")
-                (setq done (1+ done))))
-            (widen))
-          ;; Replace the entire match with updated progress
-          (replace-match (format "%s %s [%d/%d]" stars title done total) t t))))))
+      (save-match-data
+        (goto-char (point-min))
+        (while (re-search-forward (org-asana--progress-indicator-regex) nil t)
+          (org-asana--update-single-progress-indicator))))))
+
+;;; Face Application Functions
+
+(defun org-asana--apply-task-faces ()
+  "Apply faces to tasks based on priority and deadlines."
+  (save-excursion
+    (org-map-entries
+     #'org-asana--apply-face-to-current-task
+     nil 'file)))
+
+(defun org-asana--apply-face-to-current-task ()
+  "Apply appropriate face to current task."
+  (let* ((deadline (org-get-deadline-time (point)))
+         (priority (org-entry-get (point) "PRIORITY"))
+         (tags (org-entry-get (point) "ASANA-TAGS"))
+         (face (org-asana--determine-task-face deadline priority tags)))
+    (when face
+      (org-asana--apply-face-to-heading face))))
+
+(defun org-asana--determine-task-face (deadline priority tags)
+  "Determine face based on DEADLINE, PRIORITY and TAGS."
+  (ignore tags)  ; Reserved for future use
+  (cond
+   ((and deadline (time-less-p deadline (current-time)))
+    'org-asana-deadline-overdue)
+   ((and deadline (time-less-p deadline (time-add (current-time) (* 3 86400))))
+    'org-asana-deadline-warning)
+   ((and priority (string= priority "A"))
+    'org-asana-priority-high)
+   ((and priority (string= priority "B"))
+    'org-asana-priority-medium)
+   (t nil)))
+
+(defun org-asana--apply-face-to-heading (face)
+  "Apply FACE to current heading."
+  (let ((beg (line-beginning-position))
+        (end (line-end-position)))
+    (add-text-properties beg end `(face ,face))))
+
+(defcustom org-asana-apply-faces t
+  "Whether to apply faces to tasks."
+  :type 'boolean
+  :group 'org-asana)
 
 ;;; Sync Orchestration
 
@@ -560,18 +1123,21 @@
   "Main sync function - fetch, transform, and render."
   (message "Starting Asana sync...")
   (let* ((tasks-raw (org-asana--fetch-all-tasks))
-         (tasks (if (vectorp tasks-raw) (append tasks-raw nil) tasks-raw))
-         (task-count (length tasks))
-         (metadata-map (when org-asana-fetch-metadata
-                        (org-asana--fetch-all-metadata tasks)))
-         (org-tree (org-asana--build-org-tree-with-metadata tasks metadata-map))
-         (buffer (org-asana--prepare-buffer)))
-    (message "Fetched %d tasks, building org structure..." task-count)
-    (org-asana--render-org-tree org-tree buffer)
-    (with-current-buffer buffer
-      (org-asana--update-progress-indicators)
-      (save-buffer))
-    (message "Sync complete. %d tasks synchronized." task-count)))
+         (tasks (org-asana--ensure-list tasks-raw))
+         (task-count (length tasks)))
+    (message "Fetched %d tasks, populating data structures..." task-count)
+    (org-asana--populate-from-tasks tasks)
+    (let* ((metadata-map (when org-asana-fetch-metadata
+                          (org-asana--fetch-all-metadata tasks)))
+           (org-tree (org-asana--build-org-tree-from-tables metadata-map))
+           (buffer (org-asana--prepare-buffer)))
+      (org-asana--render-org-tree org-tree buffer)
+      (with-current-buffer buffer
+        (org-asana--update-progress-indicators)
+        (when org-asana-apply-faces
+          (org-asana--apply-task-faces))
+        (save-buffer))
+      (message "Sync complete. %d tasks synchronized." task-count))))
 
 (defun org-asana--prepare-buffer ()
   "Prepare or create the org buffer for Asana tasks."
@@ -584,99 +1150,75 @@
 (defun org-asana--fetch-all-metadata (tasks)
   "Fetch metadata for all TASKS and return as hash table."
   (let ((metadata (make-hash-table :test 'equal))
-        (task-list (if (vectorp tasks) (append tasks nil) tasks)))
+        (task-list (org-asana--ensure-list tasks)))
     (dolist (task task-list)
       (let ((task-gid (alist-get 'gid task)))
         (when org-asana-debug
           (message "Fetching metadata for task: %s" task-gid))
-        (puthash task-gid 
-                (org-asana--fetch-task-metadata task-gid)
-                metadata)))
+        (puthash task-gid
+                 (org-asana--fetch-task-metadata task-gid)
+                 metadata)))
     metadata))
-
-(defun org-asana--build-org-tree-with-metadata (tasks metadata-map)
-  "Build org tree from TASKS with METADATA-MAP."
-  (let ((project-tree (org-asana--build-project-tree tasks)))
-    (mapcar (lambda (project)
-             (org-asana--create-org-node-with-metadata 
-              project 1 (or metadata-map (make-hash-table :test 'equal)) tasks))
-           project-tree)))
-
-(defun org-asana--create-org-node-with-metadata (item level metadata-map tasks)
-  "Create org node from ITEM at LEVEL with METADATA-MAP and TASKS."
-  (let ((type (plist-get item :type)))
-    (cond
-     ((eq type 'project)
-      (list :level level
-            :title (plist-get item :name)
-            :properties `(("ASANA-PROJECT-GID" . ,(plist-get item :gid)))
-            :children (mapcar (lambda (child)
-                               (org-asana--create-org-node-with-metadata 
-                                child (1+ level) metadata-map tasks))
-                             (plist-get item :children))))
-     ((eq type 'section)
-      (list :level level
-            :title (plist-get item :name)
-            :properties `(("ASANA-SECTION-GID" . ,(plist-get item :gid)))
-            :children (mapcar (lambda (child)
-                               (org-asana--create-org-node-with-metadata 
-                                child (1+ level) metadata-map tasks))
-                             (plist-get item :children))))
-     ((eq type 'task)
-      (let* ((task-data (plist-get item :data))
-             (task-gid (alist-get 'gid task-data))
-             (metadata (gethash task-gid metadata-map))
-             (props (org-asana--task-to-properties task-data metadata))
-             (followers (plist-get props :followers))
-             (tags (plist-get props :tags)))
-        (list :level level
-              :title (plist-get props :name)
-              :todo-keyword "TODO"
-              :properties `(("ASANA-TASK-GID" . ,(plist-get props :gid))
-                           ("ASANA-CREATED-AT" . ,(plist-get props :created-at))
-                           ("ASANA-MODIFIED-AT" . ,(plist-get props :modified-at))
-                           ("ASANA-CREATED-BY" . ,(plist-get props :created-by))
-                           ("ASANA-ASSIGNEE" . ,(plist-get props :assignee))
-                           ("ASANA-STATUS" . ,(plist-get props :assignee-status))
-                           ("ASANA-FOLLOWERS" . ,(when followers (mapconcat #'identity followers ", ")))
-                           ("ASANA-TAGS" . ,(when tags (mapconcat #'identity tags ", ")))
-                           ("ASANA-LIKES" . ,(format "%d" (or (plist-get props :num-likes) 0)))
-                           ("ASANA-PERMALINK" . ,(plist-get props :permalink)))
-              :deadline (plist-get props :due-on)
-              :scheduled (plist-get props :start-on)
-              :body (org-asana--format-task-body props metadata)))))))
 
 ;;; Utility Functions
 
+(defun org-asana--plist-to-alist (plist)
+  "Convert PLIST to alist format."
+  (let ((result '()))
+    (while plist
+      (push (cons (substring (symbol-name (car plist)) 1)
+                  (cadr plist))
+            result)
+      (setq plist (cddr plist)))
+    (nreverse result)))
+
+(defun org-asana--format-notes-section (notes)
+  "Format NOTES section for task body."
+  (when (and notes (not (string-empty-p notes)))
+    notes))
+
+(defun org-asana--format-single-attachment (attachment)
+  "Format a single ATTACHMENT."
+  (let ((name (alist-get 'name attachment))
+        (url (alist-get 'view_url attachment)))
+    (format "- [[%s][%s]]" url name)))
+
+(defun org-asana--format-attachments-section (attachments)
+  "Format ATTACHMENTS section for task body."
+  (when (and attachments (> (length attachments) 0))
+    (concat "\n***** Attachments\n"
+            (mapconcat #'org-asana--format-single-attachment
+                      attachments "\n"))))
+
+(defun org-asana--format-single-comment (story)
+  "Format a single STORY comment."
+  (when (equal (alist-get 'type story) "comment")
+    (let ((text (alist-get 'text story))
+          (author (alist-get 'name (alist-get 'created_by story)))
+          (date (org-asana--format-timestamp (alist-get 'created_at story))))
+      (format "- %s (%s): %s" author date text))))
+
+(defun org-asana--format-comments-section (stories)
+  "Format STORIES as comments section."
+  (when (and stories org-asana-fetch-metadata (> (length stories) 0))
+    (let ((comments (delq nil (mapcar #'org-asana--format-single-comment stories))))
+      (when comments
+        (concat "\n***** Comments\n"
+                (mapconcat #'identity comments "\n"))))))
+
 (defun org-asana--format-task-body (props metadata)
   "Format task body from PROPS and METADATA."
-  (let ((notes (plist-get props :notes))
-        (stories (car metadata))
-        (attachments (cdr metadata))
-        (body-parts '()))
-    (when (and notes (not (string-empty-p notes)))
-      (push notes body-parts))
-    (when (and attachments (> (length attachments) 0))
-      (push "\n***** Attachments" body-parts)
-      (dolist (att attachments)
-        (let ((name (alist-get 'name att))
-              (url (alist-get 'view_url att)))
-          (push (format "- [[%s][%s]]" url name) body-parts))))
-    (when (and stories org-asana-fetch-metadata (> (length stories) 0))
-      (push "\n***** Comments" body-parts)
-      (dolist (story stories)
-        (when (equal (alist-get 'type story) "comment")
-          (let ((text (alist-get 'text story))
-                (author (alist-get 'name (alist-get 'created_by story)))
-                (date (org-asana--format-timestamp (alist-get 'created_at story))))
-            (push (format "- %s (%s): %s" author date text) body-parts)))))
-    (when body-parts
-      (mapconcat #'identity (nreverse body-parts) "\n"))))
+  (let ((notes (org-asana--format-notes-section (plist-get props :notes)))
+        (attachments (org-asana--format-attachments-section (cdr metadata)))
+        (comments (org-asana--format-comments-section (car metadata))))
+    (mapconcat #'identity
+               (delq nil (list notes attachments comments))
+               "\n")))
 
 (defun org-asana--validate-token ()
   "Validate the Asana token is configured."
   (unless org-asana-token
-    (error "Asana token not configured. Set `org-asana-token'")))
+    (signal 'org-asana-auth-error '("Asana token not configured. Set `org-asana-token'"))))
 
 (defun org-asana--ensure-file-exists ()
   "Ensure the org file exists or create it."
@@ -690,22 +1232,36 @@
 (defun org-asana-sync ()
   "Sync tasks between Org and Asana."
   (interactive)
+  (org-asana--ensure-initialized)
   (org-asana--validate-token)
   (org-asana--ensure-file-exists)
   (condition-case err
-      (org-asana--sync-from-asana)
+      (org-asana--sync-bidirectional)
+    (org-asana-auth-error
+     (message "Authentication failed: %s" (error-message-string err)))
+    (org-asana-rate-limit-error
+     (message "Rate limit exceeded: %s" (error-message-string err)))
+    (org-asana-api-error
+     (message "API error: %s" (error-message-string err)))
+    (org-asana-sync-error
+     (message "Sync error: %s" (error-message-string err)))
     (error
-     (message "Sync failed: %s" (error-message-string err)))))
+     (message "Unexpected error: %s" (error-message-string err)))))
 
 ;;;###autoload
 (defun org-asana-test-connection ()
   "Test the Asana API connection."
   (interactive)
+  (org-asana--ensure-initialized)
   (org-asana--validate-token)
   (condition-case err
       (let ((user-info (org-asana--fetch-workspace-info)))
-        (message "Connection successful! User GID: %s, Workspace GID: %s" 
+        (message "Connection successful! User GID: %s, Workspace GID: %s"
                 (car user-info) (cadr user-info)))
+    (org-asana-auth-error
+     (message "Authentication failed: %s" (error-message-string err)))
+    (org-asana-api-error
+     (message "API error: %s" (error-message-string err)))
     (error
      (message "Connection failed: %s" (error-message-string err)))))
 
@@ -713,13 +1269,108 @@
 (defun org-asana-initialize ()
   "Initialize org-asana with interactive setup."
   (interactive)
+  (org-asana--ensure-initialized)
   (let ((token (read-string "Enter your Asana Personal Access Token: ")))
     (customize-save-variable 'org-asana-token token)
-    (let ((file (read-file-name "Org file for Asana tasks: " 
+    (let ((file (read-file-name "Org file for Asana tasks: "
                                "~/org/" nil nil "asana.org")))
       (customize-save-variable 'org-asana-org-file file))
     (org-asana--ensure-file-exists)
     (message "org-asana initialized. Run `org-asana-sync' to fetch tasks.")))
+
+;;; Hooks and Buffer Management
+
+(defun org-asana--save-hook ()
+  "Hook function to sync on buffer save."
+  (when (and org-asana-enable-save-hook
+             (string= (buffer-file-name) (expand-file-name org-asana-org-file))
+             org-asana--initialized)
+    (org-asana--sync-bidirectional)))
+
+(defun org-asana--todo-state-hook (change)
+  "Hook function to sync when TODO state CHANGE occurs."
+  (when (and org-asana-enable-todo-hook
+             (string= (buffer-file-name) (expand-file-name org-asana-org-file))
+             org-asana--initialized
+             (eq (plist-get change :type) 'todo-state-change))
+    (save-buffer)
+    (org-asana--sync-bidirectional)))
+
+(defun org-asana--setup-buffer-hooks ()
+  "Setup buffer-local hooks for org-asana file."
+  (when (string= (buffer-file-name) (expand-file-name org-asana-org-file))
+    (add-hook 'after-save-hook #'org-asana--save-hook nil t)
+    (add-hook 'org-trigger-hook #'org-asana--todo-state-hook nil t)))
+
+(defun org-asana--remove-buffer-hooks ()
+  "Remove buffer-local hooks from org-asana file."
+  (remove-hook 'after-save-hook #'org-asana--save-hook t)
+  (remove-hook 'org-trigger-hook #'org-asana--todo-state-hook t))
+
+;;; Org-Agenda Integration
+
+(defun org-asana-enable-agenda-integration ()
+  "Add org-asana file to org-agenda-files."
+  (interactive)
+  (when org-asana-org-file
+    (require 'org-agenda)
+    (let ((file (expand-file-name org-asana-org-file)))
+      (unless (member file org-agenda-files)
+        (add-to-list 'org-agenda-files file))
+      (message "Added %s to org-agenda-files" file))))
+
+(defun org-asana-disable-agenda-integration ()
+  "Remove org-asana file from org-agenda-files."
+  (interactive)
+  (when org-asana-org-file
+    (require 'org-agenda)
+    (let ((file (expand-file-name org-asana-org-file)))
+      (setq org-agenda-files (delete file org-agenda-files))
+      (message "Removed %s from org-agenda-files" file))))
+
+(defun org-asana--setup-agenda-commands ()
+  "Setup custom org-agenda commands for Asana tasks."
+  (require 'org-agenda)
+  (defvar org-agenda-custom-commands) ; Silence compiler
+  (add-to-list 'org-agenda-custom-commands
+               '("A" . "Asana tasks"))
+  (add-to-list 'org-agenda-custom-commands
+               '("At" "Asana tasks today"
+                 ((agenda "" ((org-agenda-span 'day)
+                            (org-agenda-files (list org-asana-org-file)))))))
+  (add-to-list 'org-agenda-custom-commands
+               '("Aw" "Asana tasks this week"
+                 ((agenda "" ((org-agenda-span 'week)
+                            (org-agenda-files (list org-asana-org-file)))))))
+  (add-to-list 'org-agenda-custom-commands
+               '("Ad" "Asana tasks with deadlines"
+                 ((tags-todo "DEADLINE<=\"<+7d>\""
+                           ((org-agenda-files (list org-asana-org-file))))))))
+
+;;; Initialization
+
+(defun org-asana--ensure-initialized ()
+  "Ensure org-asana is properly initialized."
+  (unless org-asana--initialized
+    (org-asana--clear-all-tables)
+    (org-asana--create-org-data-tables)
+    (when org-asana-enable-agenda-integration
+      (org-asana-enable-agenda-integration)
+      (org-asana--setup-agenda-commands))
+    (add-hook 'find-file-hook #'org-asana--setup-buffer-hooks)
+    (setq org-asana--initialized t)))
+
+(defun org-asana-reset ()
+  "Reset org-asana state and hooks."
+  (interactive)
+  (org-asana--clear-all-tables)
+  (org-asana--create-org-data-tables)
+  (remove-hook 'find-file-hook #'org-asana--setup-buffer-hooks)
+  (when (get-file-buffer org-asana-org-file)
+    (with-current-buffer (get-file-buffer org-asana-org-file)
+      (org-asana--remove-buffer-hooks)))
+  (setq org-asana--initialized nil)
+  (message "org-asana reset complete"))
 
 (provide 'org-asana)
 ;;; org-asana.el ends here
