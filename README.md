@@ -1,78 +1,67 @@
 # org-asana
 
-Advanced bidirectional sync between Emacs Org-mode and Asana with enhanced features.
+Advanced two-way synchronization between Emacs Org-mode and Asana tasks.
 
 ## Features
 
-### Core Functionality
-- **Bidirectional sync**: Push org changes to Asana, pull Asana tasks to org
-- **Hierarchical structure**: Projects → Sections → Tasks with TODO statistics
-- **DONE task handling**: Completed tasks move to a COMPLETED section
-- **Works from anywhere**: Syncs to a designated file from any buffer
-- **Minimal configuration**: Just set your token and file path
-
-### Advanced Features
-- **Rate Limiting Protection**: Automatic retry with exponential backoff
-- **Pagination Support**: Handle workspaces with 100+ tasks
-- **Visual Task Faces**: Custom highlighting for priorities and due dates
-- **Org Agenda Integration**: Custom agenda views for Asana tasks
-- **Progress Indicators**: [x/y] indicators for projects and sections
-- **Capture Templates**: Create new Asana tasks using org-capture
-- **Complete Task Metadata**: Sync comments, attachments, activity history
-- **Extended Field Support**: Tags, followers, dependencies, custom fields, reactions
-- **Auto-collapse Views**: Property drawers and task headings collapse on open
-- **Robust Error Handling**: Graceful degradation with partial sync on errors
+- **Two-way sync**: Sync tasks between Org-mode and Asana
+- **Hierarchical structure**: Projects → Sections → Tasks with proper nesting
+- **Smart completion handling**: Completed tasks preserved in COMPLETED section
+- **Visual feedback**: Custom faces for priorities and deadlines
+- **Progress indicators**: Track completion status [x/y] for projects/sections
+- **Org-agenda integration**: Custom agenda views for Asana tasks
+- **Auto-sync hooks**: Sync on save and TODO state changes
+- **Rate limit protection**: Automatic retry with exponential backoff
+- **Metadata support**: Sync comments, attachments, and activity history
+- **Error handling**: Graceful degradation with specific error types
 
 ## Installation
 
-### Manual Installation
-
-1. Clone this repository
-2. Add to your init file:
-
-```elisp
-(add-to-list 'load-path "/path/to/org-asana")
-(require 'org-asana)
-```
-
-### Using use-package
+### Using use-package with GitHub
 
 ```elisp
 (use-package org-asana
-  :load-path "/path/to/org-asana"
+  :ensure nil
+  :load-path "~/.emacs.d/site-lisp/org-asana"
+  :init
+  ;; Clone the repository first
+  (unless (file-exists-p "~/.emacs.d/site-lisp/org-asana")
+    (make-directory "~/.emacs.d/site-lisp" t)
+    (shell-command 
+     "git clone https://github.com/theesfeld/org-asana.git ~/.emacs.d/site-lisp/org-asana"))
   :config
   (setq org-asana-token "YOUR_PERSONAL_ACCESS_TOKEN"
-        org-asana-org-file "~/org/asana.org"
-        
-        ;; Core sync settings
-        org-asana-conflict-resolution 'newest-wins  ; or 'asana-wins, 'local-wins
-        org-asana-sync-tags t                       ; sync tags between org and Asana
-        org-asana-sync-priority t                   ; sync priorities between org and Asana
-        
-        ;; Visual enhancements
-        org-asana-show-progress-indicators t        ; show [x/y] progress
-        org-asana-auto-apply-faces t               ; color-code tasks by priority/due date
-        org-asana-collapse-on-open t                ; collapse drawers and headings
-        
-        ;; Metadata sync (disable if sync is too slow)
-        org-asana-fetch-metadata t                  ; fetch comments, attachments, history
-        org-asana-show-activity-history t           ; show activity timeline
-        
-        ;; Performance tuning
-        org-asana-max-retries 3                     ; set to 1 to disable retries
-        org-asana-debug nil                         ; enable for troubleshooting
-        
-        ;; Agenda settings
-        org-asana-agenda-skip-completed t)          ; skip completed in agenda
-        
-  ;; Enable optional features
-  (org-asana-enable-agenda-integration)
-  (org-asana-enable-capture-templates))
+        org-asana-org-file "~/org/asana.org"))
 ```
 
-## Configuration
+### Using straight.el
 
-### Getting Your Asana Token
+```elisp
+(use-package org-asana
+  :straight (:host github :repo "theesfeld/org-asana")
+  :config
+  (setq org-asana-token "YOUR_PERSONAL_ACCESS_TOKEN"
+        org-asana-org-file "~/org/asana.org"))
+```
+
+### Manual Installation
+
+1. Clone the repository:
+   ```bash
+   git clone https://github.com/theesfeld/org-asana.git
+   ```
+
+2. Add to your Emacs configuration:
+   ```elisp
+   (add-to-list 'load-path "/path/to/org-asana")
+   (require 'org-asana)
+   (setq org-asana-token "YOUR_PERSONAL_ACCESS_TOKEN"
+         org-asana-org-file "~/org/asana.org")
+   ```
+
+## Getting Started
+
+### 1. Get Your Asana Token
 
 1. Go to https://app.asana.com
 2. Click your profile photo → Settings → Apps
@@ -81,137 +70,105 @@ Advanced bidirectional sync between Emacs Org-mode and Asana with enhanced featu
 5. Name it (e.g., "Emacs Org-mode Sync")
 6. Copy the token
 
-### Basic Configuration
+### 2. Basic Configuration
 
 ```elisp
 (setq org-asana-token "YOUR_TOKEN_HERE"
       org-asana-org-file "~/org/asana.org")
 ```
 
-### Configuration Options
+### 3. Test Connection
 
-#### Required Settings
+```
+M-x org-asana-test-connection
+```
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `org-asana-token` | `nil` | Your Asana Personal Access Token |
-| `org-asana-org-file` | `nil` | Org file path for sync |
+### 4. Sync Tasks
 
-#### Core Sync Settings
+```
+M-x org-asana-sync
+```
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `org-asana-conflict-resolution` | `'newest-wins` | Conflict resolution: `'newest-wins`, `'asana-wins`, or `'local-wins` |
-| `org-asana-sync-tags` | `t` | Whether to sync org tags with Asana tags |
-| `org-asana-sync-priority` | `t` | Whether to sync org priority with Asana priority |
+## Configuration Options
 
-#### Visual Features
+All configuration variables with their defaults:
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `org-asana-show-progress-indicators` | `t` | Show [x/y] progress indicators for projects/sections |
-| `org-asana-auto-apply-faces` | `t` | Apply color coding to tasks based on priority/due date |
-| `org-asana-collapse-on-open` | `t` | Collapse property drawers and task headings on open |
+```elisp
+;; Required settings (no defaults)
+(setq org-asana-token nil                          ; Your Asana Personal Access Token
+      org-asana-org-file "~/org/asana.org")        ; Path to Org file for sync
 
-#### Metadata Sync
+;; Sync behavior
+(setq org-asana-fetch-metadata t                   ; Fetch comments, attachments, activity
+      org-asana-show-progress-indicators t         ; Show [x/y] progress indicators
+      org-asana-rate-limit-delay 0.4               ; Delay between API requests (seconds)
+      org-asana-debug nil)                         ; Enable debug messages
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `org-asana-fetch-metadata` | `t` | Fetch comments, attachments, and activity history |
-| `org-asana-show-activity-history` | `t` | Show activity timeline in tasks |
+;; Visual features
+(setq org-asana-apply-faces t)                     ; Apply custom faces to tasks
 
-#### Performance Tuning
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `org-asana-max-retries` | `3` | Max retry attempts for API requests (set to 1 to disable) |
-| `org-asana-debug` | `nil` | Enable debug messages for troubleshooting |
-
-#### Other Settings
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `org-asana-agenda-skip-completed` | `t` | Skip completed tasks in agenda views |
-| `org-asana-default-project` | `nil` | Default project GID for new tasks via capture |
+;; Hooks and automation
+(setq org-asana-enable-save-hook t                 ; Auto-sync on buffer save
+      org-asana-enable-todo-hook t                 ; Auto-sync on TODO state change
+      org-asana-enable-agenda-integration t)       ; Add to org-agenda-files
+```
 
 ## Usage
 
-### Basic Commands
+### Interactive Commands
 
-- `M-x org-asana-test-connection` - Test your API connection
-- `M-x org-asana-sync` - Sync tasks between Org and Asana
+- `M-x org-asana-sync` - Perform bidirectional sync
+- `M-x org-asana-test-connection` - Test API connection
+- `M-x org-asana-initialize` - Interactive setup wizard
+- `M-x org-asana-enable-agenda-integration` - Add to agenda files
+- `M-x org-asana-disable-agenda-integration` - Remove from agenda files
+- `M-x org-asana-reset` - Reset state and hooks
 
-### Agenda Integration
+### Org-Agenda Integration
 
-After enabling agenda integration, use these custom agenda commands:
+When agenda integration is enabled, custom commands are available:
 
-- `C-c a A a` - View all Asana tasks
-- `C-c a A d` - View Asana tasks due today
-- `C-c a A w` - View Asana tasks due this week
-- `C-c a A p` - View Asana tasks sorted by priority
-
-### Capture Templates
-
-After enabling capture templates:
-
-- `C-c c a` - Create a basic Asana task
-- `C-c c A` - Create an Asana task with notes
-
-Tasks created via capture are synced to Asana on the next `org-asana-sync`.
+- `C-c a A t` - Asana tasks today
+- `C-c a A w` - Asana tasks this week  
+- `C-c a A d` - Asana tasks with deadlines (within 7 days)
 
 ## File Structure
 
-After syncing, your org file will look like:
+After syncing, your org file will have this structure:
 
 ```org
-* Active Projects
-** Project Name [2/5]
-*** Section Name [1/3]
-**** TODO [#A] Task 1 :work:urgent:
-     DEADLINE: <2024-07-20>
-     SCHEDULED: <2024-07-18>
-     :PROPERTIES:
-     :asana-id: 123456789
-     :asana-modified: 2024-07-15T10:00:00.000Z
-     :permalink-url: https://app.asana.com/0/project/123456789
-     :followers: John Doe, Jane Smith
-     :custom-field-Status: In Progress
-     :likes: 3
-     :END:
-     
-     Task notes and description here...
-     
-***** Comments
-- John Doe (2024-07-15 14:30): This looks good!
+* Project Name [2/5]
   :PROPERTIES:
-  :ASANA-COMMENT-GID: 987654321
+  :ASANA-PROJECT-GID: 123456789
   :END:
-  
-***** Attachments
-- [[https://example.com/file.pdf][Design Document]]
-  :PROPERTIES:
-  :ASANA-ATTACHMENT-GID: 456789123
-  :END:
-  
-***** Activity History
-- Jane Smith (2024-07-15 10:00): created task
-- John Doe (2024-07-15 14:30): added comment
-- System (2024-07-15 15:00): set due date: 2024-07-20
-     
-**** DONE [#B] Task 2 :project:review:
-**** TODO Task 3
-*** Another Section [1/2]
-**** TODO [#C] Task 4 :backend:
-**** DONE Task 5
-
-* COMPLETED
-** Project Name
-*** Section Name  
-**** DONE [#A] Completed task :work:urgent:
-     :PROPERTIES:
-     :asana-id: 987654321
-     :asana-completed-at: 2024-07-14T15:00:00.000Z
-     :END:
+** Section Name [1/3]
+   :PROPERTIES:
+   :ASANA-SECTION-GID: 987654321
+   :END:
+*** TODO [#A] Task Title
+    DEADLINE: <2024-07-20>
+    :PROPERTIES:
+    :ASANA-ID: 456789123
+    :ASANA-MODIFIED: 2024-07-15T10:00:00.000Z
+    :ASANA-ASSIGNEE: John Doe
+    :ASANA-TAGS: frontend, urgent
+    :ASANA-PERMALINK: https://app.asana.com/0/123456789/456789123
+    :END:
+    
+    Task description and notes here...
+    
+    ** Attachments
+    - [[https://example.com/file.pdf][Design Document]]
+    
+    ** Comments
+    - John Doe (2024-07-15): This looks good!
+    - Jane Smith (2024-07-16): Approved
+    
+*** DONE Task 2
+    :PROPERTIES:
+    :ASANA-ID: 789456123
+    :ASANA-COMPLETED-AT: 2024-07-14T15:00:00.000Z
+    :END:
 ```
 
 ## Visual Features
@@ -220,161 +177,139 @@ After syncing, your org file will look like:
 
 Tasks are highlighted based on their status:
 
-- **Overdue tasks**: Bold red face
-- **Due today**: Bold green face  
-- **Due soon (within 7 days)**: Orange italic face
-- **High priority [#A]**: Bold red face
-- **Medium priority [#B]**: Bold yellow face
-- **Low priority [#C]**: Bold blue face
+| Face | Description | Default Style |
+|------|-------------|---------------|
+| `org-asana-priority-high` | High priority tasks [#A] | Bold red |
+| `org-asana-priority-medium` | Medium priority tasks [#B] | Orange |
+| `org-asana-deadline-warning` | Tasks due within 3 days | Bold dark orange |
+| `org-asana-deadline-overdue` | Overdue tasks | Bold red background |
+
+Customize faces:
+```elisp
+(set-face-attribute 'org-asana-priority-high nil :foreground "red" :weight 'bold)
+```
 
 ### Progress Indicators
 
-Projects and sections show completion progress:
-
+Projects and sections show completion status:
 ```org
-** Project Name [5/12]
-*** Section Name [2/4]
+* Project Name [5/12]
+** Section Name [2/4]
 ```
 
-## How It Works
-
-1. **Sync from Asana**: Fetches all incomplete tasks assigned to you, organizing them by project and section
-2. **Sync to Asana**: Updates task names, notes, completion status, due dates, priorities, and tags
-3. **DONE tasks**: When you mark a task as DONE in org, it syncs to Asana and moves to the COMPLETED section
-4. **New tasks**: Tasks created via capture templates are created in Asana during sync
-5. **No duplicates**: Completed tasks in the COMPLETED section are never re-synced
-6. **Conflict resolution**: When both org and Asana have changes, uses your configured strategy
+Update manually with `M-x org-asana-update-progress-indicators`.
 
 ## Advanced Features
 
+### Automatic Sync Hooks
+
+When enabled, org-asana automatically syncs:
+- On buffer save (when `org-asana-enable-save-hook` is `t`)
+- On TODO state changes (when `org-asana-enable-todo-hook` is `t`)
+
+Disable temporarily:
+```elisp
+(setq org-asana-enable-save-hook nil)
+```
+
 ### Rate Limiting
 
-The package automatically handles Asana's rate limits:
-- Tracks remaining API calls (150/minute limit)
-- Implements exponential backoff on rate limit errors
-- Retries failed requests automatically
+The package handles Asana's rate limits (150 requests/minute):
+- Tracks remaining API calls
+- Implements exponential backoff
+- Automatic retry on 429 errors
+- User feedback during rate limit waits
 
-### Pagination
+### Error Handling
 
-Automatically fetches all tasks when you have more than 100:
-- Follows pagination links transparently
-- No configuration needed
+Custom error types for better debugging:
+- `org-asana-error` - Base error type
+- `org-asana-auth-error` - Authentication failures
+- `org-asana-rate-limit-error` - Rate limit exceeded
+- `org-asana-api-error` - API errors
+- `org-asana-sync-error` - Sync-specific errors
 
-### Org Agenda Integration
+## Data Mapping
 
-When enabled, adds your Asana file to `org-agenda-files` and provides:
-- Custom agenda views for Asana tasks
-- Filtering by due date and priority
-- Skip completed tasks option
+| Org-mode | Asana | Sync Direction |
+|----------|-------|----------------|
+| Heading text | Task name | ↔️ Bidirectional |
+| TODO/DONE | Completed status | ↔️ Bidirectional |
+| DEADLINE | Due date | → To Asana only |
+| Body text | Task notes | → To Asana only |
+| [#A]/[#B]/[#C] | Priority | ← From Asana only |
+| :ASANA-ID: | Task GID | ← From Asana only |
+| :ASANA-MODIFIED: | Modified time | ← From Asana only |
+| :ASANA-TAGS: | Tags | ← From Asana only |
+| Comments | Task stories | ← From Asana only |
+| Attachments | File links | ← From Asana only |
 
-### Capture Templates
+## Performance Tips
 
-Create new Asana tasks directly from Emacs:
-- Select project interactively or use default
-- Set deadline and notes
-- Tasks created on next sync
+For large workspaces:
 
-## Data Synchronization
+1. **Disable metadata fetching** for faster sync:
+   ```elisp
+   (setq org-asana-fetch-metadata nil)
+   ```
 
-### Supported Fields
+2. **Increase rate limit delay** if hitting limits:
+   ```elisp
+   (setq org-asana-rate-limit-delay 0.6)
+   ```
 
-| Org | Asana | Notes |
-|-----|-------|-------|
-| Heading | Task name | Bidirectional sync |
-| TODO/DONE | Completed status | Bidirectional sync |
-| DEADLINE | Due date | Bidirectional sync |
-| SCHEDULED | Start date | Bidirectional sync |
-| [#A]/[#B]/[#C] | Priority (high/medium/low) | Optional, bidirectional |
-| :tags: | Tags | Optional, bidirectional |
-| Body text | Notes | Bidirectional sync |
-| :asana-id: | Task GID | Auto-managed |
-| :asana-modified: | Last modified | Auto-managed |
-| :permalink-url: | Task URL | Read-only from Asana |
-| :followers: | Task followers | Read-only from Asana |
-| :custom-field-*: | Custom fields | Read-only from Asana |
-| :likes:/:hearts: | Reactions | Read-only from Asana |
-| Comments section | Comments/Stories | Read-only from Asana |
-| Attachments section | File attachments | Read-only from Asana |
-| Activity History | Activity timeline | Read-only from Asana |
-
-### Priority Mapping
-
-| Org Priority | Asana Priority |
-|--------------|----------------|
-| [#A] | high |
-| [#B] | medium |
-| [#C] | low |
-| (none) | (none) |
-
-## Conflict Resolution
-
-When the same task is modified in both org and Asana:
-
-- **`'newest-wins`** (default): Compares timestamps, keeps most recent
-- **`'asana-wins`**: Always prefers Asana data
-- **`'local-wins`**: Always prefers org data
-
-## Performance
-
-- Efficient API usage with pagination
-- Rate limit protection prevents API errors
-- Progress indicators update only changed sections
-- Visual faces applied after sync completion
-
-## Limitations
-
-- Only syncs tasks assigned to you
-- Tags must exist in Asana workspace before syncing
-- Subtasks are not currently supported
-- Comments, attachments, and activity history are read-only (cannot sync from org to Asana)
-- Custom fields are displayed but cannot be edited in org
+3. **Disable auto-sync hooks** for manual control:
+   ```elisp
+   (setq org-asana-enable-save-hook nil
+         org-asana-enable-todo-hook nil)
+   ```
 
 ## Troubleshooting
 
-### Connection Issues
+### Enable debug mode
 ```elisp
-;; Test your connection
-M-x org-asana-test-connection
-```
-
-### Rate Limit Errors
-The package handles these automatically, but you can check:
-```elisp
-org-asana--rate-limit-remaining  ; Check remaining calls
-org-asana--rate-limit-reset      ; Check reset time
-```
-
-### Agenda Not Showing Tasks
-```elisp
-;; Re-enable agenda integration
-M-x org-asana-enable-agenda-integration
-```
-
-### Sync Failures with Large Task Lists
-```elisp
-;; Reduce retries to avoid cascading failures
-(setq org-asana-max-retries 1)
-
-;; Or disable metadata fetching for faster sync
-(setq org-asana-fetch-metadata nil)
-
-;; Enable debug mode to see detailed errors
 (setq org-asana-debug t)
 ```
 
-### Property Drawers Not Collapsing
+### Check rate limit status
 ```elisp
-;; Ensure collapse feature is enabled
-(setq org-asana-collapse-on-open t)
+;; In *scratch* buffer
+org-asana--rate-limit-remaining
+org-asana--rate-limit-reset
 ```
+
+### Reset everything
+```elisp
+M-x org-asana-reset
+```
+
+### Common Issues
+
+**"No Asana token configured"**
+- Set `org-asana-token` with your Personal Access Token
+
+**"Authentication failed"**
+- Verify token is valid and not expired
+- Check token has required permissions
+
+**Rate limit errors**
+- Wait for reset (shown in error message)
+- Increase `org-asana-rate-limit-delay`
+
+**Sync seems slow**
+- Disable metadata fetching: `(setq org-asana-fetch-metadata nil)`
+- Check network connection
+- Enable debug mode to see progress
 
 ## Contributing
 
 Contributions welcome! Please:
-1. Follow GNU Elisp coding standards
-2. Use small, single-purpose functions
+
+1. Follow GNU Emacs Lisp coding standards
+2. Maintain "one function, one task" principle (max 15 lines)
 3. Add docstrings to all functions
-4. Test with large task lists
+4. Include tests for new features
+5. Update documentation as needed
 
 ## License
 
@@ -385,4 +320,10 @@ it under the terms of the GNU General Public License as published by
 the Free Software Foundation, either version 3 of the License, or
 (at your option) any later version.
 
-See LICENSE file for details.
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with this program. If not, see <https://www.gnu.org/licenses/>.
