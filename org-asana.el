@@ -299,13 +299,22 @@
   "Clean NOTES field from org-mode corruption."
   (when notes
     (let ((cleaned notes))
-      (setq cleaned (replace-regexp-in-string ":PROPERTIES:[\n\r\\s]*\\(?:.*[\n\r]\\)*?:END:[\n\r]*" "" cleaned))
-      (setq cleaned (replace-regexp-in-string "^ODO .*[\n\r]*" "" cleaned))
-      (setq cleaned (replace-regexp-in-string "DEADLINE: <[^>]+>[\n\r]*" "" cleaned))
+      ;; Remove org properties blocks
+      (setq cleaned (replace-regexp-in-string ":PROPERTIES:[^:]*:END:[\n\r]*" "" cleaned))
+      ;; Remove TODO keywords
+      (setq cleaned (replace-regexp-in-string "^\\(?:TODO\\|DONE\\|ODO\\) " "" cleaned))
+      ;; Remove deadline lines
+      (setq cleaned (replace-regexp-in-string "^DEADLINE: <[^>]+>[\n\r]*" "" cleaned))
+      ;; Extract text from org links
       (setq cleaned (replace-regexp-in-string "\\[\\[https?://[^]]+\\]\\[\\([^]]+\\)\\]\\]" "\\1" cleaned))
-      (setq cleaned (replace-regexp-in-string "/[0-9]+/[0-9]+/[^]]+\\]\\[" "" cleaned))
+      ;; Remove broken links
+      (setq cleaned (replace-regexp-in-string "/[0-9]+/[0-9]+/[^]]*\\]\\[\\([^]]+\\)\\]\\]" "\\1" cleaned))
+      ;; Remove org headings
       (setq cleaned (replace-regexp-in-string "^\\*+ " "" cleaned))
-      (setq cleaned (replace-regexp-in-string ":ASANA[^:]*: [^\n]+[\n\r]*" "" cleaned))
+      ;; Remove property lines
+      (setq cleaned (replace-regexp-in-string "^:[A-Z_]+: .*[\n\r]*" "" cleaned))
+      ;; Clean up whitespace
+      (setq cleaned (replace-regexp-in-string "[\n\r]+" "\n" cleaned))
       (setq cleaned (string-trim cleaned))
       (if (string-empty-p cleaned) nil cleaned))))
 
