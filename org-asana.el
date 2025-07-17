@@ -1397,12 +1397,25 @@ Set to 1 to disable retries entirely."
 
 (defun org-asana--execute-metadata-batch (task-ids)
   "Execute metadata batch request for TASK-IDS."
-  (let* ((actions (org-asana--build-metadata-batch-actions task-ids))
-         (action-count (length actions))
-         (task-count (length task-ids)))
-    (message "Building batch request with %d actions for %d tasks..." action-count task-count)
-    (when actions
-      (org-asana--process-batch-request actions task-ids))))
+  (let ((all-results '())
+        (total-tasks (length task-ids))
+        (processed 0))
+    ;; Process in batches of 5 tasks (10 actions per batch: 5 stories + 5 attachments)
+    (while task-ids
+      (let* ((batch-task-ids (seq-take task-ids 5))
+             (remaining-task-ids (seq-drop task-ids 5))
+             (actions (org-asana--build-metadata-batch-actions batch-task-ids))
+             (action-count (length actions))
+             (batch-count (length batch-task-ids)))
+        (message "Building batch request with %d actions for %d tasks..." action-count batch-count)
+        (when actions
+          (let ((batch-results (org-asana--process-batch-request actions batch-task-ids)))
+            (when batch-results
+              (setq all-results (append all-results batch-results)))))
+        (setq processed (+ processed batch-count))
+        (message "Processed %d/%d tasks" processed total-tasks)
+        (setq task-ids remaining-task-ids)))
+    all-results))
 
 (defun org-asana--process-batch-request (actions task-ids)
   "Process batch request with ACTIONS for TASK-IDS."
@@ -1449,7 +1462,8 @@ Set to 1 to disable retries entirely."
   "Process rich task data with metadata in single pass."
   (save-excursion
     (goto-char (point-min))
-    (re-search-forward "^\\* Active Projects$" nil t)
+    (unless (re-search-forward "^\\* Active Projects$" nil t)
+      (error "Cannot find Active Projects section"))
     (let ((section-start (point))
           (task-tree (org-asana--build-rich-task-tree rich-tasks)))
 
@@ -1776,6 +1790,8 @@ Returns :org or :asana depending on resolution strategy."
 
 (defun org-asana--find-or-create-heading (level heading parent-pos)
   "Find or create HEADING at LEVEL after PARENT-POS."
+  (unless parent-pos
+    (error "org-asana--find-or-create-heading: parent-pos is nil for heading '%s'" heading))
   (save-excursion
     (goto-char parent-pos)
     (let* ((stars (make-string level ?*))
@@ -1788,10 +1804,14 @@ Returns :org or :asana depending on resolution strategy."
                      (point))))
 
       (if (re-search-forward regexp end-pos t)
-          (point)
+          (progn
+            (beginning-of-line)
+            (point))
         (goto-char end-pos)
         (unless (bolp) (insert "\n"))
         (insert (format "%s %s\n" stars heading-with-stats))
+        (forward-line -1)
+        (org-back-to-heading t)
         (point)))))
 
 (defun org-asana--update-or-create-task (task parent-pos batch-data)
