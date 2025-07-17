@@ -1498,25 +1498,42 @@ Set to 1 to disable retries entirely."
             ;; Create section if doesn't exist
             (unless section-entry
               (setq section-entry (list section-name))
-              (push section-entry (cdr project-entry)))
+              (setcdr project-entry (cons section-entry (cdr project-entry))))
             ;; Add task to section
-            (push task (cdr section-entry))))))
-    tree))
+            (setcdr section-entry (cons task (cdr section-entry)))))))
+    ;; Reverse the order of sections and tasks within each section
+    (dolist (project-entry tree)
+      (setcdr project-entry (nreverse (cdr project-entry)))
+      (dolist (section-entry (cdr project-entry))
+        (setcdr section-entry (nreverse (cdr section-entry)))))
+    (nreverse tree)))
 
 (defun org-asana--process-rich-project-sections (project-entry section-start task-metadata)
   "Process PROJECT-ENTRY sections with rich task data."
   (let* ((project-name (car project-entry))
          (sections (cdr project-entry))
          (project-pos (org-asana--find-or-create-heading 2 project-name section-start)))
-
+    (when org-asana-debug
+      (message "Processing project '%s' at pos %s with %d sections" 
+               project-name project-pos (length sections)))
     (dolist (section-entry sections)
       (let* ((section-name (car section-entry))
-             (section-tasks (cdr section-entry))
-             (section-pos (org-asana--find-or-create-heading 3 section-name project-pos)))
-
-        ;; Process each task in the section
-        (dolist (task section-tasks)
-          (org-asana--process-rich-single-task task task-metadata section-pos))))))
+             (section-tasks (cdr section-entry)))
+        (when org-asana-debug
+          (message "Processing section '%s' with %d tasks" 
+                   section-name (length section-tasks)))
+        (when section-tasks
+          (let ((section-pos (org-asana--find-or-create-heading 3 section-name project-pos)))
+            (when org-asana-debug
+              (message "Section '%s' created/found at pos %s" section-name section-pos))
+            ;; Process each task in the section
+            (dolist (task section-tasks)
+              (condition-case err
+                  (org-asana--process-rich-single-task task task-metadata section-pos)
+                (error
+                 (message "Error processing task: %s" (error-message-string err))
+                 (when org-asana-debug
+                   (message "Task data: %S" task)))))))))))
 
 (defun org-asana--process-rich-single-task (task task-metadata task-pos)
   "Process single rich TASK with TASK-METADATA at TASK-POS."
