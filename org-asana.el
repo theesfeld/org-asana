@@ -417,5 +417,83 @@
             (widen))
           (replace-match (format "[%d/%d]" done total) nil nil nil 0))))))
 
+;;; Sync Orchestration
+
+(defun org-asana--sync-from-asana ()
+  "Main sync function - fetch, transform, and render."
+  (message "Starting Asana sync...")
+  (let* ((tasks (org-asana--fetch-all-tasks))
+         (task-count (length tasks))
+         (metadata-map (when org-asana-fetch-metadata
+                        (org-asana--fetch-all-metadata tasks)))
+         (org-tree (org-asana--build-org-tree-with-metadata tasks metadata-map))
+         (buffer (org-asana--prepare-buffer)))
+    (message "Fetched %d tasks, building org structure..." task-count)
+    (org-asana--render-org-tree org-tree buffer)
+    (with-current-buffer buffer
+      (org-asana--update-progress-indicators)
+      (save-buffer))
+    (message "Sync complete. %d tasks synchronized." task-count)))
+
+(defun org-asana--prepare-buffer ()
+  "Prepare or create the org buffer for Asana tasks."
+  (let ((buffer (find-file-noselect org-asana-org-file)))
+    (with-current-buffer buffer
+      (unless (derived-mode-p 'org-mode)
+        (org-mode)))
+    buffer))
+
+(defun org-asana--fetch-all-metadata (tasks)
+  "Fetch metadata for all TASKS and return as hash table."
+  (let ((metadata (make-hash-table :test 'equal)))
+    (dolist (task tasks)
+      (let ((task-gid (alist-get 'gid task)))
+        (when org-asana-debug
+          (message "Fetching metadata for task: %s" task-gid))
+        (puthash task-gid 
+                (org-asana--fetch-task-metadata task-gid)
+                metadata)))
+    metadata))
+
+(defun org-asana--build-org-tree-with-metadata (tasks metadata-map)
+  "Build org tree from TASKS with METADATA-MAP."
+  (let ((project-tree (org-asana--build-project-tree tasks)))
+    (mapcar (lambda (project)
+             (org-asana--create-org-node-with-metadata project 2 metadata-map tasks))
+           project-tree)))
+
+(defun org-asana--create-org-node-with-metadata (item level metadata-map tasks)
+  "Create org node from ITEM at LEVEL with METADATA-MAP and TASKS."
+  (let ((type (plist-get item :type)))
+    (cond
+     ((eq type 'project)
+      (list :level level
+            :title (plist-get item :name)
+            :properties `(("ASANA-PROJECT-GID" . ,(plist-get item :gid)))
+            :children (mapcar (lambda (child)
+                               (org-asana--create-org-node-with-metadata 
+                                child (1+ level) metadata-map tasks))
+                             (plist-get item :children))))
+     ((eq type 'section)
+      (list :level level
+            :title (plist-get item :name)
+            :properties `(("ASANA-SECTION-GID" . ,(plist-get item :gid)))
+            :children (mapcar (lambda (child)
+                               (org-asana--create-org-node-with-metadata 
+                                child (1+ level) metadata-map tasks))
+                             (plist-get item :children))))
+     ((eq type 'task)
+      (let* ((task-data (plist-get item :data))
+             (task-gid (alist-get 'gid task-data))
+             (metadata (gethash task-gid metadata-map))
+             (props (org-asana--task-to-properties task-data metadata)))
+        (list :level level
+              :title (plist-get props :name)
+              :properties `(("ASANA-TASK-GID" . ,(plist-get props :gid))
+                           ("ASANA-CREATED-AT" . ,(plist-get props :created-at))
+                           ("ASANA-MODIFIED-AT" . ,(plist-get props :modified-at)))
+              :deadline (plist-get props :due-on)
+              :body (plist-get props :notes)))))))
+
 (provide 'org-asana)
 ;;; org-asana.el ends here
