@@ -109,7 +109,7 @@
           (when (org-entry-get nil "asana-id")
             (org-asana--fontify-task))
         (error
-         (when org-asana-debug
+         (when (bound-and-true-p org-asana-debug)
            (message "Error applying faces at line %d: %s"
                    (line-number-at-pos)
                    (error-message-string err))))))))
@@ -691,7 +691,7 @@ Set to 1 to disable retries entirely."
   "Report progress for PAGE-COUNT with TOTAL-ITEMS."
   (message "Fetched page %d (%d items so far)" page-count total-items))
 
-(defun org-asana--handle-pagination-error (error-count max-errors page-count err)
+(defun org-asana--handle-pagination-error (error-count _max-errors page-count err)
   "Handle pagination error and return updated error count."
   (let ((new-error-count (1+ error-count)))
     (when org-asana-debug
@@ -1454,7 +1454,7 @@ Set to 1 to disable retries entirely."
       (dolist (project-entry task-tree)
         (when (cdr project-entry) ; Only if project has sections
           (org-asana--process-rich-project-sections project-entry section-start
-                                                   rich-tasks task-metadata)))
+                                                   task-metadata)))
 
       ;; Clean up and update statistics
       (org-asana--cleanup-empty-sections)
@@ -1486,7 +1486,7 @@ Set to 1 to disable retries entirely."
             (push task (cdr section-entry))))))
     tree))
 
-(defun org-asana--process-rich-project-sections (project-entry section-start rich-tasks task-metadata)
+(defun org-asana--process-rich-project-sections (project-entry section-start task-metadata)
   "Process PROJECT-ENTRY sections with rich task data."
   (let* ((project-name (car project-entry))
          (sections (cdr project-entry))
@@ -1509,10 +1509,9 @@ Set to 1 to disable retries entirely."
          (metadata-entry (assoc task-gid task-metadata))
          (stories (when metadata-entry (cadr metadata-entry)))
          (attachments (when metadata-entry (cddr metadata-entry)))
-         (task-fields (org-asana--extract-rich-task-fields task stories attachments))))
-
-  ;; Find or create task heading
-  (let ((heading-pos (org-asana--find-or-create-heading 4 clean-task-name task-pos)))
+         (task-fields (org-asana--extract-rich-task-fields task stories attachments))
+         ;; Find or create task heading
+         (heading-pos (org-asana--find-or-create-heading 4 clean-task-name task-pos)))
     (goto-char heading-pos)
     (org-asana--update-rich-task task-fields)))
 
@@ -1536,7 +1535,7 @@ Set to 1 to disable retries entirely."
 (defun org-asana--update-rich-task (task-fields)
   "Update task using rich TASK-FIELDS data."
   (org-asana--update-task-heading task-fields)
-  (org-asana--update-task-status task-fields)
+  (org-asana--update-task-state task-fields)
   (org-asana--update-task-deadline task-fields)
   (org-asana--update-task-priority task-fields)
   (org-asana--update-task-properties task-fields)
@@ -1585,7 +1584,7 @@ Set to 1 to disable retries entirely."
          (scheduled (plist-get org-task-data :scheduled))
          (body (plist-get org-task-data :body))
          (priority (plist-get org-task-data :priority))
-         (tags (plist-get org-task-data :tags))
+         (_tags (plist-get org-task-data :tags))
          (due-date (when deadline
                     (format-time-string
                      "%Y-%m-%d"
@@ -1821,8 +1820,8 @@ Uses org-map-entries for robust subtree boundary handling."
     (org-back-to-heading t)
     (let ((current-heading (org-get-heading t t t t))
           (current-todo (org-get-todo-state))
-          (current-priority (org-entry-get nil "PRIORITY"))
-          (current-tags (org-get-tags)))
+          (_current-priority (org-entry-get nil "PRIORITY"))
+          (_current-tags (org-get-tags)))
       ;; Only update if the heading text is actually different
       (unless (string= current-heading new-text)
         (org-edit-headline new-text)
@@ -1835,15 +1834,15 @@ Uses org-map-entries for robust subtree boundary handling."
   (save-excursion
     (org-back-to-heading t)
     (org-end-of-meta-data t)
-    (let ((start (point))
-          (subtree-end (save-excursion
-                        (org-end-of-subtree t)
-                        (point)))
-          (metadata-start (save-excursion
-                           (when (re-search-forward "^\\*\\{5\\} " subtree-end t)
-                             (line-beginning-position)))))
-      (let ((end (or metadata-start subtree-end)))
-        (string-trim (buffer-substring-no-properties start end))))))
+    (let* ((start (point))
+           (subtree-end (save-excursion
+                         (org-end-of-subtree t)
+                         (point)))
+           (metadata-start (save-excursion
+                            (when (re-search-forward "^\\*\\{5\\} " subtree-end t)
+                              (line-beginning-position))))
+           (end (or metadata-start subtree-end)))
+      (string-trim (buffer-substring-no-properties start end)))))
 
 (defun org-asana--extract-task-data ()
   "Extract task data from current org entry."
