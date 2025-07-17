@@ -495,5 +495,55 @@
               :deadline (plist-get props :due-on)
               :body (plist-get props :notes)))))))
 
+;;; Utility Functions
+
+(defun org-asana--validate-token ()
+  "Validate the Asana token is configured."
+  (unless org-asana-token
+    (error "Asana token not configured. Set `org-asana-token'")))
+
+(defun org-asana--ensure-file-exists ()
+  "Ensure the org file exists or create it."
+  (unless (file-exists-p org-asana-org-file)
+    (make-directory (file-name-directory org-asana-org-file) t)
+    (write-region "" nil org-asana-org-file)))
+
+;;; Interactive Commands
+
+;;;###autoload
+(defun org-asana-sync ()
+  "Sync tasks between Org and Asana."
+  (interactive)
+  (org-asana--validate-token)
+  (org-asana--ensure-file-exists)
+  (condition-case err
+      (org-asana--sync-from-asana)
+    (error
+     (message "Sync failed: %s" (error-message-string err)))))
+
+;;;###autoload
+(defun org-asana-test-connection ()
+  "Test the Asana API connection."
+  (interactive)
+  (org-asana--validate-token)
+  (condition-case err
+      (let ((user-info (org-asana--fetch-workspace-info)))
+        (message "Connection successful! User GID: %s, Workspace GID: %s" 
+                (car user-info) (cadr user-info)))
+    (error
+     (message "Connection failed: %s" (error-message-string err)))))
+
+;;;###autoload
+(defun org-asana-initialize ()
+  "Initialize org-asana with interactive setup."
+  (interactive)
+  (let ((token (read-string "Enter your Asana Personal Access Token: ")))
+    (customize-save-variable 'org-asana-token token)
+    (let ((file (read-file-name "Org file for Asana tasks: " 
+                               "~/org/" nil nil "asana.org")))
+      (customize-save-variable 'org-asana-org-file file))
+    (org-asana--ensure-file-exists)
+    (message "org-asana initialized. Run `org-asana-sync' to fetch tasks.")))
+
 (provide 'org-asana)
 ;;; org-asana.el ends here
