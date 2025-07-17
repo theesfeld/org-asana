@@ -80,7 +80,14 @@
   :group 'org)
 
 (defcustom org-asana-token nil
-  "Personal Access Token for Asana API."
+  "Personal Access Token for Asana API.
+If nil, will attempt to retrieve from authinfo."
+  :type '(choice (const :tag "Use authinfo" nil)
+                 (string :tag "Token"))
+  :group 'org-asana)
+
+(defcustom org-asana-authinfo-machine "app.asana.com"
+  "Machine name to use when looking up token in authinfo."
   :type 'string
   :group 'org-asana)
 
@@ -733,7 +740,7 @@
 
 (defun org-asana--build-request-headers ()
   "Build request headers with authentication."
-  `(("Authorization" . ,(concat "Bearer " org-asana-token))
+  `(("Authorization" . ,(concat "Bearer " (org-asana--get-token)))
     ("Content-Type" . "application/json")))
 
 (defun org-asana--build-request-url (endpoint)
@@ -1215,10 +1222,28 @@
                (delq nil (list notes attachments comments))
                "\n")))
 
+(defun org-asana--get-token-from-authinfo ()
+  "Retrieve Asana token from authinfo."
+  (require 'auth-source)
+  (let ((auth (car (auth-source-search :host org-asana-authinfo-machine
+                                       :require '(:secret)
+                                       :max 1))))
+    (when auth
+      (let ((secret (plist-get auth :secret)))
+        (if (functionp secret)
+            (funcall secret)
+          secret)))))
+
+(defun org-asana--get-token ()
+  "Get Asana token from variable or authinfo."
+  (or org-asana-token
+      (org-asana--get-token-from-authinfo)
+      (signal 'org-asana-auth-error 
+              '("No Asana token found. Set `org-asana-token' or add to authinfo"))))
+
 (defun org-asana--validate-token ()
   "Validate the Asana token is configured."
-  (unless org-asana-token
-    (signal 'org-asana-auth-error '("Asana token not configured. Set `org-asana-token'"))))
+  (org-asana--get-token))
 
 (defun org-asana--ensure-file-exists ()
   "Ensure the org file exists or create it."

@@ -40,8 +40,34 @@ Advanced two-way synchronization between Emacs Org-mode and Asana tasks.
 (use-package org-asana
   :straight (:host github :repo "theesfeld/org-asana")
   :config
-  (setq org-asana-token "YOUR_PERSONAL_ACCESS_TOKEN"
-        org-asana-org-file "~/org/asana.org"))
+  ;; Use authinfo for secure token storage (recommended)
+  (setq org-asana-token nil  ; Will read from authinfo
+        org-asana-org-file "~/org/asana.org"
+        
+        ;; Core sync settings
+        org-asana-conflict-resolution 'newest-wins  ; or 'asana-wins, 'local-wins
+        org-asana-sync-tags t                       ; sync tags between org and Asana
+        org-asana-sync-priority t                   ; sync priorities between org and Asana
+        
+        ;; Visual enhancements
+        org-asana-show-progress-indicators t        ; show [x/y] progress
+        org-asana-auto-apply-faces t               ; color-code tasks by priority/due date
+        org-asana-collapse-on-open t                ; collapse drawers and headings
+        
+        ;; Metadata sync (disable if sync is too slow)
+        org-asana-fetch-metadata t                  ; fetch comments, attachments, history
+        org-asana-show-activity-history t           ; show activity timeline
+        
+        ;; Performance tuning
+        org-asana-max-retries 3                     ; set to 1 to disable retries
+        org-asana-debug nil                         ; enable for troubleshooting
+        
+        ;; Agenda settings
+        org-asana-agenda-skip-completed t)          ; skip completed in agenda
+        
+  ;; Enable optional features
+  (org-asana-enable-agenda-integration)
+  (org-asana-enable-capture-templates))
 ```
 
 ### Manual Installation
@@ -73,11 +99,47 @@ Advanced two-way synchronization between Emacs Org-mode and Asana tasks.
 ### 2. Basic Configuration
 
 ```elisp
+;; Option 1: Direct token (less secure)
 (setq org-asana-token "YOUR_TOKEN_HERE"
+      org-asana-org-file "~/org/asana.org")
+
+;; Option 2: Use authinfo (recommended)
+(setq org-asana-token nil  ; Will use authinfo
       org-asana-org-file "~/org/asana.org")
 ```
 
-### 3. Test Connection
+### Secure Token Storage with Authinfo
+
+For better security, store your token in `~/.authinfo` or `~/.authinfo.gpg`:
+
+```
+# ~/.authinfo
+machine app.asana.com password YOUR_PERSONAL_ACCESS_TOKEN
+
+# Or use a custom machine name:
+machine my-asana password YOUR_PERSONAL_ACCESS_TOKEN
+```
+
+Then configure org-asana to use it:
+
+```elisp
+(setq org-asana-token nil  ; Use authinfo instead of hardcoded token
+      org-asana-authinfo-machine "my-asana")  ; Optional: custom machine name
+```
+
+The package will automatically retrieve the token from authinfo when needed.
+
+### Configuration Options
+
+#### Required Settings
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `org-asana-token` | `nil` | Your Asana Personal Access Token (if nil, uses authinfo) |
+| `org-asana-authinfo-machine` | `"app.asana.com"` | Machine name for authinfo lookup |
+| `org-asana-org-file` | `"~/org/asana.org"` | Org file path for sync |
+
+#### Core Sync Settings
 
 ```
 M-x org-asana-test-connection
