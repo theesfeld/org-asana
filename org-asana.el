@@ -367,13 +367,40 @@
     (dolist (section (org-asana--extract-sections-for-project tasks project-gid))
       (let* ((section-gid (alist-get 'gid section))
              (section-name (alist-get 'name section))
-             (section-tasks (org-asana--get-tasks-for-section tasks project-gid section-gid)))
+             (section-tasks (org-asana--sort-tasks-by-created-date 
+                           (org-asana--get-tasks-for-section tasks project-gid section-gid))))
         (push (list :type 'section
                     :gid section-gid
                     :name section-name
-                    :children section-tasks)
+                    :children section-tasks
+                    :oldest-task-date (org-asana--get-oldest-task-date section-tasks))
               sections)))
-    (nreverse sections)))
+    ;; Sort sections by oldest task date
+    (sort sections
+          (lambda (a b)
+            (let ((date-a (plist-get a :oldest-task-date))
+                  (date-b (plist-get b :oldest-task-date)))
+              (string< (or date-a "") (or date-b "")))))))
+
+(defun org-asana--get-oldest-task-date (task-items)
+  "Get the oldest created_at date from TASK-ITEMS."
+  (let ((oldest-date nil))
+    (dolist (item task-items)
+      (let* ((task (plist-get item :data))
+             (date (alist-get 'created_at task)))
+        (when (and date (or (null oldest-date) (string< date oldest-date)))
+          (setq oldest-date date))))
+    oldest-date))
+
+(defun org-asana--sort-tasks-by-created-date (task-items)
+  "Sort TASK-ITEMS by creation date, oldest first."
+  (sort task-items
+        (lambda (a b)
+          (let* ((task-a (plist-get a :data))
+                 (task-b (plist-get b :data))
+                 (date-a (alist-get 'created_at task-a))
+                 (date-b (alist-get 'created_at task-b)))
+            (string< (or date-a "") (or date-b ""))))))
 
 (defun org-asana--get-tasks-for-section (tasks project-gid section-gid)
   "Get tasks for PROJECT-GID and SECTION-GID from TASKS."
@@ -436,7 +463,7 @@
   "Build complete org tree structure from TASKS."
   (let ((project-tree (org-asana--build-project-tree tasks)))
     (mapcar (lambda (project)
-             (org-asana--create-org-node project 2))
+             (org-asana--create-org-node project 1))
            project-tree)))
 
 ;;; Rendering Functions
@@ -476,11 +503,9 @@
 (defun org-asana--insert-heading (level title &optional todo-keyword)
   "Insert heading at LEVEL with TITLE and optional TODO-KEYWORD."
   (insert (make-string level ?*) " ")
-  (when (and todo-keyword (>= level 4))
+  (when (and todo-keyword (>= level 3))
     (insert todo-keyword " "))
   (insert title)
-  (when (or (= level 2) (= level 3))
-    (insert " [/]"))
   (insert "\n"))
 
 (defun org-asana--insert-deadline (deadline)
@@ -511,18 +536,23 @@
   (when org-asana-show-progress-indicators
     (save-excursion
       (goto-char (point-min))
-      (while (re-search-forward "^\\*\\*+ .+\\[\\([0-9]+\\)/\\([0-9]+\\)\\]" nil t)
-        (let ((done 0)
+      ;; Match level 2 and 3 headings with [/] or [x/y]
+      (while (re-search-forward "^\\(\\*\\{2,3\\}\\) \\(.+?\\) \\[\\(/\\|[0-9]+/[0-9]+\\)\\]" nil t)
+        (let ((stars (match-string 1))
+              (title (match-string 2))
+              (done 0)
               (total 0))
           (save-excursion
             (org-narrow-to-subtree)
             (goto-char (point-min))
+            ;; Count TODO and DONE tasks under this heading
             (while (re-search-forward "^\\*\\{4,\\} \\(TODO\\|DONE\\)" nil t)
               (setq total (1+ total))
               (when (string= (match-string 1) "DONE")
                 (setq done (1+ done))))
             (widen))
-          (replace-match (format "[%d/%d]" done total) nil nil nil 0))))))
+          ;; Replace the entire match with updated progress
+          (replace-match (format "%s %s [%d/%d]" stars title done total) t t))))))
 
 ;;; Sync Orchestration
 
@@ -569,7 +599,7 @@
   (let ((project-tree (org-asana--build-project-tree tasks)))
     (mapcar (lambda (project)
              (org-asana--create-org-node-with-metadata 
-              project 2 (or metadata-map (make-hash-table :test 'equal)) tasks))
+              project 1 (or metadata-map (make-hash-table :test 'equal)) tasks))
            project-tree)))
 
 (defun org-asana--create-org-node-with-metadata (item level metadata-map tasks)
