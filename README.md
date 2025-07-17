@@ -41,7 +41,8 @@ Advanced bidirectional sync between Emacs Org-mode and Asana with enhanced featu
 (use-package org-asana
   :load-path "/path/to/org-asana"
   :config
-  (setq org-asana-token "YOUR_PERSONAL_ACCESS_TOKEN"
+  ;; Use authinfo for secure token storage (recommended)
+  (setq org-asana-token nil  ; Will read from authinfo
         org-asana-org-file "~/org/asana.org"
         
         ;; Core sync settings
@@ -84,9 +85,35 @@ Advanced bidirectional sync between Emacs Org-mode and Asana with enhanced featu
 ### Basic Configuration
 
 ```elisp
+;; Option 1: Direct token (less secure)
 (setq org-asana-token "YOUR_TOKEN_HERE"
       org-asana-org-file "~/org/asana.org")
+
+;; Option 2: Use authinfo (recommended)
+(setq org-asana-token nil  ; Will use authinfo
+      org-asana-org-file "~/org/asana.org")
 ```
+
+### Secure Token Storage with Authinfo
+
+For better security, store your token in `~/.authinfo` or `~/.authinfo.gpg`:
+
+```
+# ~/.authinfo
+machine app.asana.com password YOUR_PERSONAL_ACCESS_TOKEN
+
+# Or use a custom machine name:
+machine my-asana password YOUR_PERSONAL_ACCESS_TOKEN
+```
+
+Then configure org-asana to use it:
+
+```elisp
+(setq org-asana-token nil  ; Use authinfo instead of hardcoded token
+      org-asana-authinfo-machine "my-asana")  ; Optional: custom machine name
+```
+
+The package will automatically retrieve the token from authinfo when needed.
 
 ### Configuration Options
 
@@ -94,8 +121,9 @@ Advanced bidirectional sync between Emacs Org-mode and Asana with enhanced featu
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `org-asana-token` | `nil` | Your Asana Personal Access Token |
-| `org-asana-org-file` | `nil` | Org file path for sync |
+| `org-asana-token` | `nil` | Your Asana Personal Access Token (if nil, uses authinfo) |
+| `org-asana-authinfo-machine` | `"app.asana.com"` | Machine name for authinfo lookup |
+| `org-asana-org-file` | `"~/org/asana.org"` | Org file path for sync |
 
 #### Core Sync Settings
 
