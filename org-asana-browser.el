@@ -24,6 +24,7 @@
 
 (require 'org-asana)
 (require 'tabulated-list)
+(require 'org-asana-users nil t)
 
 ;;; Custom Variables
 
@@ -328,8 +329,7 @@
 (defun org-asana-browse-my-tasks ()
   "Browse my tasks."
   (interactive)
-  (let* ((workspace-gid (cadr (org-asana--fetch-workspace-info)))
-         (me (org-asana--fetch-current-user))
+  (let* ((me (org-asana--fetch-current-user))
          (my-gid (alist-get 'gid me)))
     (setq org-asana-browser--current-project nil)
     (setq org-asana-browser--current-filter `(:assignee ,my-gid))

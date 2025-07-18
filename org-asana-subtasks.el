@@ -226,7 +226,7 @@
 ;;; Creation Handling
 
 (defun org-asana--handle-new-subtasks ()
-  "Handle creation of new subtasks marked with 'new' GID."
+  "Handle creation of new subtasks marked with `new' GID."
   (org-map-entries
    (lambda ()
      (let ((gid (org-entry-get (point) "ASANA-TASK-GID"))
