@@ -1,5 +1,6 @@
 # org-asana
 
+
 Advanced bidirectional sync between Emacs Org-mode and Asana with enhanced features.
 
 ## Features
@@ -43,28 +44,28 @@ Advanced bidirectional sync between Emacs Org-mode and Asana with enhanced featu
   :config
   (setq org-asana-token "YOUR_PERSONAL_ACCESS_TOKEN"
         org-asana-org-file "~/org/asana.org"
-        
+
         ;; Core sync settings
         org-asana-conflict-resolution 'newest-wins  ; or 'asana-wins, 'local-wins
         org-asana-sync-tags t                       ; sync tags between org and Asana
         org-asana-sync-priority t                   ; sync priorities between org and Asana
-        
+
         ;; Visual enhancements
         org-asana-show-progress-indicators t        ; show [x/y] progress
         org-asana-auto-apply-faces t               ; color-code tasks by priority/due date
         org-asana-collapse-on-open t                ; collapse drawers and headings
-        
+
         ;; Metadata sync (disable if sync is too slow)
         org-asana-fetch-metadata t                  ; fetch comments, attachments, history
         org-asana-show-activity-history t           ; show activity timeline
-        
+
         ;; Performance tuning
         org-asana-max-retries 3                     ; set to 1 to disable retries
         org-asana-debug nil                         ; enable for troubleshooting
-        
+
         ;; Agenda settings
         org-asana-agenda-skip-completed t)          ; skip completed in agenda
-        
+
   ;; Enable optional features
   (org-asana-enable-agenda-integration)
   (org-asana-enable-capture-templates))
@@ -178,26 +179,26 @@ After syncing, your org file will look like:
      :custom-field-Status: In Progress
      :likes: 3
      :END:
-     
+
      Task notes and description here...
-     
+
 ***** Comments
 - John Doe (2024-07-15 14:30): This looks good!
   :PROPERTIES:
   :ASANA-COMMENT-GID: 987654321
   :END:
-  
+
 ***** Attachments
 - [[https://example.com/file.pdf][Design Document]]
   :PROPERTIES:
   :ASANA-ATTACHMENT-GID: 456789123
   :END:
-  
+
 ***** Activity History
 - Jane Smith (2024-07-15 10:00): created task
 - John Doe (2024-07-15 14:30): added comment
 - System (2024-07-15 15:00): set due date: 2024-07-20
-     
+
 **** DONE [#B] Task 2 :project:review:
 **** TODO Task 3
 *** Another Section [1/2]
@@ -206,7 +207,7 @@ After syncing, your org file will look like:
 
 * COMPLETED
 ** Project Name
-*** Section Name  
+*** Section Name
 **** DONE [#A] Completed task :work:urgent:
      :PROPERTIES:
      :asana-id: 987654321
@@ -221,7 +222,7 @@ After syncing, your org file will look like:
 Tasks are highlighted based on their status:
 
 - **Overdue tasks**: Bold red face
-- **Due today**: Bold green face  
+- **Due today**: Bold green face
 - **Due soon (within 7 days)**: Orange italic face
 - **High priority [#A]**: Bold red face
 - **Medium priority [#B]**: Bold yellow face
