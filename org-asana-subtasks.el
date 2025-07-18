@@ -249,8 +249,7 @@
   "Extract task notes from current entry."
   (save-excursion
     (org-back-to-heading t)
-    (let ((start (point))
-          (end (save-excursion (org-end-of-subtree t t))))
+    (let ((end (save-excursion (org-end-of-subtree t t))))
       (buffer-substring-no-properties
        (save-excursion
          (org-end-of-meta-data t)

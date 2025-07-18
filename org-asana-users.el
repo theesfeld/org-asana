@@ -166,8 +166,8 @@
         ;; Update local properties
         (let ((user (seq-find (lambda (u) (equal (alist-get 'gid u) user-gid))
                              org-asana--users-cache)))
-          (org-asana--set-assignee-property user))
-        (message "Task assigned to %s" (alist-get 'name user))))))
+          (org-asana--set-assignee-property user)
+          (message "Task assigned to %s" (alist-get 'name user)))))))
 
 (defun org-asana-unassign-task ()
   "Remove assignee from current task."
@@ -258,7 +258,7 @@
 
 (defcustom org-asana-assignee-tags nil
   "Alist mapping Org tags to Asana user GIDs.
-Example: '((\"john\" . \"1234567890\") (\"jane\" . \"0987654321\"))"
+Example: \\='((\"john\" . \"1234567890\") (\"jane\" . \"0987654321\"))"
   :type '(alist :key-type string :value-type string)
   :group 'org-asana)
 

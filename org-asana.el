@@ -49,7 +49,6 @@
     org-asana-custom-fields
     org-asana-dependencies
     org-asana-subtasks
-    org-asana-webhooks
     org-asana-attachments
     org-asana-users
     org-asana-types
@@ -60,7 +59,6 @@ Each module provides additional functionality:
 - org-asana-custom-fields: Support for Asana Premium custom fields
 - org-asana-dependencies: Task dependency management
 - org-asana-subtasks: Recursive subtask synchronization
-- org-asana-webhooks: Real-time updates via webhooks
 - org-asana-attachments: File attachment upload/download
 - org-asana-users: User and assignee management
 - org-asana-types: Task type indicators (milestone, approval)
@@ -69,7 +67,6 @@ Each module provides additional functionality:
               (const :tag "Custom fields" org-asana-custom-fields)
               (const :tag "Dependencies" org-asana-dependencies)
               (const :tag "Subtasks" org-asana-subtasks)
-              (const :tag "Webhooks" org-asana-webhooks)
               (const :tag "Attachments" org-asana-attachments)
               (const :tag "User management" org-asana-users)
               (const :tag "Task types" org-asana-types)
@@ -655,6 +652,7 @@ When enabled, changing TODO states will trigger a full sync."
   ;; Handle attachments if module is loaded
   (when (and (boundp 'org-asana-modules)
              (memq 'org-asana-attachments org-asana-modules)
+             (boundp 'org-asana-auto-download-attachments)
              org-asana-auto-download-attachments
              (fboundp 'org-asana--download-all-attachments-in-buffer))
     (org-asana--download-all-attachments-in-buffer)))
