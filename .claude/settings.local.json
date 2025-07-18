@@ -18,7 +18,8 @@
       "mcp__context7__get-library-docs",
       "Bash(cat:*)",
       "WebFetch(domain:developers.asana.com)",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "WebFetch(domain:forum.asana.com)"
     ],
     "deny": []
   }
