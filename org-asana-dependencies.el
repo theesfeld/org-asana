@@ -23,7 +23,9 @@
 ;;; Code:
 
 (require 'org-asana)
-(require 'org-depend)  ; For BLOCKER property support
+
+;; Try to load org-depend if available
+(require 'org-depend nil t)  ; For BLOCKER property support
 
 ;;; Constants
 

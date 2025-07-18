@@ -170,7 +170,7 @@
   (goto-char (point-min))
   (when (re-search-forward (format ":ASANA-TASK-GID: %s" task-gid) nil t)
     (org-back-to-heading t)
-    (org-show-context)))
+    (org-fold-show-context)))
 
 (defun org-asana-browser-open-in-asana ()
   "Open task at point in web browser."
@@ -261,7 +261,7 @@
   (let* ((tags (org-asana--fetch-workspace-tags))
          (tag-names (mapcar (lambda (tag) (alist-get 'name tag)) tags))
          (selected (completing-read "Filter by tag: " tag-names))
-         (tag (seq-find (lambda (t) (equal (alist-get 'name t) selected)) tags)))
+         (tag (seq-find (lambda (tag) (equal (alist-get 'name tag) selected)) tags)))
     (when tag
       (setq org-asana-browser--current-filter
             (plist-put org-asana-browser--current-filter :tag (alist-get 'gid tag))))))

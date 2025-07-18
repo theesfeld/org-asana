@@ -1,4 +1,4 @@
-;;; test-auth.el --- Test org-asana with provided token
+;;; test-auth.el --- Test org-asana with provided token -*- lexical-binding: t; -*-
 
 ;; Test the org-asana sync with the provided token
 

@@ -238,14 +238,11 @@
 (defun org-asana-create-separator (title)
   "Create a separator task with TITLE."
   (interactive "sSeparator title: ")
-  (let ((task-data `((name . ,(concat title ":"))
-                    (resource_subtype . "section")
-                    (is_rendered_as_separator . t))))
-    ;; Create at current position
-    (org-insert-heading-respect-content)
-    (insert (org-asana--format-task-title-with-type
-             `((name . ,title)
-               (resource_subtype . "section"))))
+  ;; Create at current position
+  (org-insert-heading-respect-content)
+  (insert (org-asana--format-task-title-with-type
+           `((name . ,title)
+             (resource_subtype . "section"))))
     (org-set-property "ASANA-TASK-GID" "new")
     (org-set-property "ASANA-TYPE" "section")
     (org-set-property "ASANA-SEPARATOR" "t")
