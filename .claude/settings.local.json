@@ -17,7 +17,8 @@
       "WebFetch(domain:emacs.stackexchange.com)",
       "mcp__context7__get-library-docs",
       "Bash(cat:*)",
-      "WebFetch(domain:developers.asana.com)"
+      "WebFetch(domain:developers.asana.com)",
+      "Bash(git checkout:*)"
     ],
     "deny": []
   }
