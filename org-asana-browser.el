@@ -218,6 +218,38 @@
           (org-asana--update-task task-gid `((assignee . ,user-gid)))
           (org-asana-browser-refresh))))))
 
+(defun org-asana-browser-set-project ()
+  "Set project for task at point."
+  (interactive)
+  (let ((task-gid (tabulated-list-get-id)))
+    (when task-gid
+      (let* ((projects (org-asana--fetch-workspace-projects))
+             (project-names (mapcar (lambda (p) (alist-get 'name p)) projects))
+             (selected (completing-read "Project: " project-names nil t))
+             (project (cl-find selected projects :key (lambda (p) (alist-get 'name p)) :test #'string=)))
+        (when project
+          (org-asana--make-request
+           "POST"
+           (format "/tasks/%s/addProject" task-gid)
+           `((data . ((project . ,(alist-get 'gid project))))))
+          (org-asana-browser-refresh))))))
+
+(defun org-asana-browser-add-tag ()
+  "Add tag to task at point."
+  (interactive)
+  (let ((task-gid (tabulated-list-get-id)))
+    (when task-gid
+      (let* ((tags (org-asana--get-all-tags))
+             (tag-names (mapcar (lambda (tag) (alist-get 'name tag)) tags))
+             (selected (completing-read "Tag: " tag-names nil t))
+             (tag (cl-find selected tags :key (lambda (tg) (alist-get 'name tg)) :test #'string=)))
+        (when tag
+          (org-asana--make-request
+           "POST"
+           (format "/tasks/%s/addTag" task-gid)
+           `((data . ((tag . ,(alist-get 'gid tag))))))
+          (org-asana-browser-refresh))))))
+
 ;;; Navigation
 
 (defun org-asana-browser-next-page ()

@@ -25,6 +25,7 @@
 (require 'org-asana)
 (require 'url)
 (require 'mm-util)
+(require 'org-element)
 
 ;;; Constants
 

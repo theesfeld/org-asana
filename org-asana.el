@@ -771,6 +771,13 @@ When enabled, changing TODO states will trigger a full sync."
    (format "/tasks/%s/stories" task-gid)
    `((data . ((text . ,comment-text))))))
 
+(defun org-asana--update-task (task-gid fields)
+  "Update task with TASK-GID using FIELDS alist."
+  (org-asana--make-request
+   "PUT"
+   (format "/tasks/%s" task-gid)
+   `((data . ,fields))))
+
 ;;; Display and Query Functions
 
 (defun org-asana--display-all-projects ()
@@ -996,6 +1003,19 @@ When enabled, changing TODO states will trigger a full sync."
           (setq next-path (alist-get 'next_page response))
           (unless next-path (throw 'done all-data)))))))
 
+(defun org-asana--fetch-all-with-pagination (endpoint &optional params)
+  "Fetch all pages from ENDPOINT with optional PARAMS."
+  (if params
+      (let ((url-with-params (concat endpoint
+                                     (if (string-match-p "\\?" endpoint) "&" "?")
+                                     (mapconcat (lambda (p)
+                                                  (format "%s=%s"
+                                                          (url-hexify-string (car p))
+                                                          (url-hexify-string (cdr p))))
+                                                params "&"))))
+        (org-asana--fetch-paginated url-with-params))
+    (org-asana--fetch-paginated endpoint)))
+
 (defun org-asana--fetch-workspace-info ()
   "Fetch current user and workspace information."
   (let ((response (org-asana--make-request "GET" "/users/me")))
@@ -1006,6 +1026,12 @@ When enabled, changing TODO states will trigger a full sync."
                             workspaces)))
       (list (alist-get 'gid user-data)
             (alist-get 'gid (car workspace-list))))))
+
+(defun org-asana--get-all-tags ()
+  "Fetch all tags from the workspace."
+  (let ((workspace-gid (cadr (org-asana--fetch-workspace-info))))
+    (org-asana--fetch-paginated
+     (format "/workspaces/%s/tags" workspace-gid))))
 
 (defun org-asana--build-task-opt-fields ()
   "Build opt_fields parameter for task API requests."
@@ -1314,6 +1340,36 @@ When enabled, changing TODO states will trigger a full sync."
   "Insert BODY text."
   (when (and body (not (string-empty-p body)))
     (insert "\n" body "\n")))
+
+(defun org-asana--update-task-in-org (task)
+  "Update existing TASK in org buffer at point."
+  (let ((completed (alist-get 'completed task))
+        (due-on (alist-get 'due_on task)))
+    (save-excursion
+      (org-back-to-heading)
+      ;; Update TODO state
+      (when (re-search-forward "^\\*+ \\(TODO\\|DONE\\) " (line-end-position) t)
+        (replace-match
+         (format "* %s " (if completed "DONE" "TODO"))
+         nil nil))
+      ;; Update deadline
+      (when due-on
+        (org-deadline nil due-on)))))
+
+(defun org-asana--insert-new-task (task)
+  "Insert new TASK as org heading in current buffer."
+  (let* ((name (alist-get 'name task))
+         (task-gid (alist-get 'gid task))
+         (completed (alist-get 'completed task))
+         (due-on (alist-get 'due_on task))
+         (notes (alist-get 'notes task)))
+    (goto-char (point-max))
+    (insert "\n*** " (if completed "DONE" "TODO") " " name "\n")
+    (org-set-property "ASANA-TASK-GID" task-gid)
+    (when due-on
+      (org-deadline nil due-on))
+    (when (and notes (not (string-empty-p notes)))
+      (insert "\n" notes "\n"))))
 
 (defun org-asana--count-subtask-progress ()
   "Count DONE and total tasks under current heading."
