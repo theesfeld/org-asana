@@ -96,8 +96,10 @@ If nil, will attempt to retrieve from authinfo."
   :type 'file
   :group 'org-asana)
 
-(defcustom org-asana-fetch-metadata t
-  "Whether to fetch comments and attachments for tasks."
+(defcustom org-asana-fetch-metadata nil
+  "Whether to fetch comments and attachments for tasks.
+Note: Enabling this significantly slows down sync as it makes
+2 additional API calls per task (stories and attachments)."
   :type 'boolean
   :group 'org-asana)
 
@@ -116,13 +118,15 @@ If nil, will attempt to retrieve from authinfo."
   :type 'boolean
   :group 'org-asana)
 
-(defcustom org-asana-enable-save-hook t
-  "Whether to enable automatic sync on save."
+(defcustom org-asana-enable-save-hook nil
+  "Whether to enable automatic sync on save.
+When enabled, saving the org-asana file will trigger a full sync."
   :type 'boolean
   :group 'org-asana)
 
-(defcustom org-asana-enable-todo-hook t
-  "Whether to sync when TODO state changes."
+(defcustom org-asana-enable-todo-hook nil
+  "Whether to sync when TODO state changes.
+When enabled, changing TODO states will trigger a full sync."
   :type 'boolean
   :group 'org-asana)
 
@@ -1050,7 +1054,9 @@ If nil, will attempt to retrieve from authinfo."
   "Insert PROPERTIES drawer."
   (insert ":PROPERTIES:\n")
   (dolist (prop properties)
-    (when (cdr prop)
+    (when (and (cdr prop)
+               ;; Skip stories - they'll be handled separately
+               (not (equal (car prop) "stories")))
       (let ((value (cdr prop)))
         (insert ":" (car prop) ": " 
                 (cond
@@ -1182,11 +1188,14 @@ If nil, will attempt to retrieve from authinfo."
 (defun org-asana--fetch-all-metadata (tasks)
   "Fetch metadata for all TASKS and return as hash table."
   (let ((metadata (make-hash-table :test 'equal))
-        (task-list (org-asana--ensure-list tasks)))
+        (task-list (org-asana--ensure-list tasks))
+        (task-count 0)
+        (total-tasks (length (org-asana--ensure-list tasks))))
+    (message "Fetching metadata for %d tasks (this may take a while)..." total-tasks)
     (dolist (task task-list)
       (let ((task-gid (alist-get 'gid task)))
-        (when org-asana-debug
-          (message "Fetching metadata for task: %s" task-gid))
+        (setq task-count (1+ task-count))
+        (message "Fetching metadata... [%d/%d]" task-count total-tasks)
         (puthash task-gid
                  (org-asana--fetch-task-metadata task-gid)
                  metadata)))
