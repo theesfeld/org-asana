@@ -42,6 +42,47 @@
 (require 'url)
 (require 'cl-lib)
 
+;;; Module Loading
+
+(defcustom org-asana-modules 
+  '(org-asana-cache
+    org-asana-custom-fields
+    org-asana-dependencies
+    org-asana-subtasks
+    org-asana-webhooks
+    org-asana-attachments
+    org-asana-users
+    org-asana-types
+    org-asana-browser)
+  "List of org-asana modules to load.
+Each module provides additional functionality:
+- org-asana-cache: Caching layer to reduce API calls
+- org-asana-custom-fields: Support for Asana Premium custom fields
+- org-asana-dependencies: Task dependency management
+- org-asana-subtasks: Recursive subtask synchronization
+- org-asana-webhooks: Real-time updates via webhooks
+- org-asana-attachments: File attachment upload/download
+- org-asana-users: User and assignee management
+- org-asana-types: Task type indicators (milestone, approval)
+- org-asana-browser: Interactive task browser"
+  :type '(set (const :tag "Caching layer" org-asana-cache)
+              (const :tag "Custom fields" org-asana-custom-fields)
+              (const :tag "Dependencies" org-asana-dependencies)
+              (const :tag "Subtasks" org-asana-subtasks)
+              (const :tag "Webhooks" org-asana-webhooks)
+              (const :tag "Attachments" org-asana-attachments)
+              (const :tag "User management" org-asana-users)
+              (const :tag "Task types" org-asana-types)
+              (const :tag "Task browser" org-asana-browser))
+  :group 'org-asana)
+
+(defun org-asana--load-modules ()
+  "Load configured org-asana modules."
+  (dolist (module org-asana-modules)
+    (condition-case err
+        (require module nil t)
+      (error (message "Failed to load %s: %s" module (error-message-string err))))))
+
 ;;; Error Conditions
 
 (define-error 'org-asana-error "Org-Asana error")
@@ -410,7 +451,12 @@ When enabled, changing TODO states will trigger a full sync."
          (metadata (gethash task-gid metadata-map))
          (properties (org-asana--task-to-properties task metadata))
          (body-text (org-asana--format-task-body properties metadata))
-         (task-title (org-asana--format-task-title task))
+         ;; Use type-aware title formatting if available
+         (task-title (if (and (boundp 'org-asana-modules)
+                             (memq 'org-asana-types org-asana-modules)
+                             (fboundp 'org-asana--format-task-title-with-type))
+                        (org-asana--format-task-title-with-type task)
+                      (org-asana--format-task-title task)))
          (completed (alist-get 'completed task))
          (todo-keyword (if completed "DONE" "TODO")))
     (list :level level
@@ -600,7 +646,18 @@ When enabled, changing TODO states will trigger a full sync."
   (org-asana--handle-deleted-tasks)
   (org-asana--handle-modified-tasks)
   (org-asana--handle-completed-tasks)
-  (org-asana--handle-task-comments))
+  (org-asana--handle-task-comments)
+  ;; Handle dependencies if module is loaded
+  (when (and (boundp 'org-asana-modules)
+             (memq 'org-asana-dependencies org-asana-modules)
+             (fboundp 'org-asana--sync-all-dependencies))
+    (org-asana--sync-all-dependencies))
+  ;; Handle attachments if module is loaded
+  (when (and (boundp 'org-asana-modules)
+             (memq 'org-asana-attachments org-asana-modules)
+             org-asana-auto-download-attachments
+             (fboundp 'org-asana--download-all-attachments-in-buffer))
+    (org-asana--download-all-attachments-in-buffer)))
 
 (defun org-asana--handle-new-tasks ()
   "Handle tasks that are new from API."
@@ -686,6 +743,11 @@ When enabled, changing TODO states will trigger a full sync."
       (org-asana--update-progress-indicators)
       (when (and (boundp 'org-asana-apply-faces) org-asana-apply-faces)
         (org-asana--apply-task-faces))
+      ;; Apply type faces if module is loaded
+      (when (and (boundp 'org-asana-modules)
+                 (memq 'org-asana-types org-asana-modules)
+                 (fboundp 'org-asana--apply-type-faces-buffer))
+        (org-asana--apply-type-faces-buffer))
       (save-buffer))))
 
 ;;; API Update Functions
@@ -891,6 +953,16 @@ When enabled, changing TODO states will trigger a full sync."
 
 (defun org-asana--make-request (method endpoint &optional data)
   "Make an API request to METHOD ENDPOINT with optional DATA."
+  ;; Use cached request if cache module is loaded
+  (if (and (boundp 'org-asana-modules) 
+           (memq 'org-asana-cache org-asana-modules)
+           (fboundp 'org-asana--cached-request))
+      (org-asana--cached-request method endpoint data)
+    ;; Otherwise use standard request
+    (org-asana--make-request-uncached method endpoint data)))
+
+(defun org-asana--make-request-uncached (method endpoint &optional data)
+  "Make an uncached API request to METHOD ENDPOINT with optional DATA."
   (org-asana--validate-token)
   (org-asana--check-rate-limit)
   (let* ((url (org-asana--build-request-url endpoint))
@@ -939,16 +1011,25 @@ When enabled, changing TODO states will trigger a full sync."
 
 (defun org-asana--build-task-opt-fields ()
   "Build opt_fields parameter for task API requests."
-  (concat "gid,name,notes,html_notes,completed,completed_at,"
-          "due_on,due_at,start_on,start_at,"
-          "created_at,modified_at,created_by.name,"
-          "assignee.name,assignee_status,"
-          "followers.name,num_likes,liked,"
-          "parent.gid,parent.name,num_subtasks,"
-          "tags.gid,tags.name,"
-          "memberships.project.gid,memberships.project.name,"
-          "memberships.section.gid,memberships.section.name,"
-          "permalink_url,resource_subtype"))
+  (let ((base-fields (concat "gid,name,notes,html_notes,completed,completed_at,"
+                            "due_on,due_at,start_on,start_at,"
+                            "created_at,modified_at,created_by.name,"
+                            "assignee.name,assignee.gid,assignee_status,"
+                            "followers.name,num_likes,liked,"
+                            "parent.gid,parent.name,num_subtasks,"
+                            "tags.gid,tags.name,"
+                            "memberships.project.gid,memberships.project.name,"
+                            "memberships.section.gid,memberships.section.name,"
+                            "permalink_url,resource_subtype")))
+    (when (and (boundp 'org-asana-modules) (memq 'org-asana-types org-asana-modules))
+      (setq base-fields (concat base-fields ",approval_status,is_rendered_as_separator")))
+    (when (and (boundp 'org-asana-modules) (memq 'org-asana-custom-fields org-asana-modules))
+      (setq base-fields (concat base-fields ",custom_fields,custom_fields.gid,custom_fields.name,custom_fields.type,custom_fields.enum_options,custom_fields.enum_value,custom_fields.multi_enum_values,custom_fields.text_value,custom_fields.number_value,custom_fields.date_value,custom_fields.people_value")))
+    (when (and (boundp 'org-asana-modules) (memq 'org-asana-dependencies org-asana-modules))
+      (setq base-fields (concat base-fields ",dependencies,dependents")))
+    (when (and (boundp 'org-asana-modules) (memq 'org-asana-attachments org-asana-modules))
+      (setq base-fields (concat base-fields ",num_attachments")))
+    base-fields))
 
 (defun org-asana--build-task-search-endpoint (workspace-gid user-gid)
   "Build task search endpoint for WORKSPACE-GID and USER-GID."
@@ -960,8 +1041,14 @@ When enabled, changing TODO states will trigger a full sync."
   (let* ((workspace-info (org-asana--fetch-workspace-info))
          (user-gid (car workspace-info))
          (workspace-gid (cadr workspace-info))
-         (endpoint (org-asana--build-task-search-endpoint workspace-gid user-gid)))
-    (org-asana--fetch-paginated endpoint)))
+         (endpoint (org-asana--build-task-search-endpoint workspace-gid user-gid))
+         (tasks (org-asana--fetch-paginated endpoint)))
+    ;; Fetch subtasks if module is loaded
+    (when (and (boundp 'org-asana-modules)
+               (memq 'org-asana-subtasks org-asana-modules)
+               (fboundp 'org-asana--enhance-tasks-with-subtasks))
+      (setq tasks (org-asana--enhance-tasks-with-subtasks tasks)))
+    tasks))
 
 (defun org-asana--fetch-task-metadata (task-id)
   "Fetch stories and attachments for TASK-ID."
@@ -1105,11 +1192,34 @@ When enabled, changing TODO states will trigger a full sync."
 
 (defun org-asana--task-to-properties (task metadata)
   "Convert TASK and METADATA to property list."
-  (append (org-asana--extract-basic-properties task)
-          (org-asana--extract-date-properties task)
-          (org-asana--extract-people-properties task)
-          (org-asana--extract-tag-properties task)
-          (org-asana--extract-metadata-properties metadata)))
+  (let ((properties (append (org-asana--extract-basic-properties task)
+                           (org-asana--extract-date-properties task)
+                           (org-asana--extract-people-properties task)
+                           (org-asana--extract-tag-properties task)
+                           (org-asana--extract-metadata-properties metadata))))
+    ;; Add custom fields if module is loaded
+    (when (and (boundp 'org-asana-modules)
+               (memq 'org-asana-custom-fields org-asana-modules)
+               (fboundp 'org-asana--extract-custom-field-properties))
+      (setq properties (append properties (org-asana--extract-custom-field-properties task))))
+    ;; Add type properties if module is loaded
+    (when (and (boundp 'org-asana-modules)
+               (memq 'org-asana-types org-asana-modules)
+               (fboundp 'org-asana--add-type-properties))
+      (setq properties (append properties (org-asana--add-type-properties task))))
+    ;; Add assignee properties if module is loaded
+    (when (and (boundp 'org-asana-modules)
+               (memq 'org-asana-users org-asana-modules)
+               (fboundp 'org-asana--add-assignee-to-properties))
+      (setq properties (append properties (org-asana--add-assignee-to-properties task))))
+    ;; Add dependency count if module is loaded
+    (when (and (boundp 'org-asana-modules)
+               (memq 'org-asana-dependencies org-asana-modules))
+      (let ((dep-count (+ (length (alist-get 'dependencies task))
+                         (length (alist-get 'dependents task)))))
+        (when (> dep-count 0)
+          (push `(:asana-dependency-count . ,(number-to-string dep-count)) properties))))
+    properties))
 
 ;;; Org Tree Building Functions
 
@@ -1614,6 +1724,7 @@ When enabled, changing TODO states will trigger a full sync."
 (defun org-asana--ensure-initialized ()
   "Ensure org-asana is properly initialized."
   (unless org-asana--initialized
+    (org-asana--load-modules)
     (org-asana--clear-all-tables)
     (org-asana--create-org-data-tables)
     (when org-asana-enable-agenda-integration
@@ -1633,6 +1744,53 @@ When enabled, changing TODO states will trigger a full sync."
       (org-asana--remove-buffer-hooks)))
   (setq org-asana--initialized nil)
   (message "org-asana reset complete"))
+
+;;; Module-Specific Commands
+
+(defun org-asana-browse ()
+  "Open the Asana task browser."
+  (interactive)
+  (if (and (boundp 'org-asana-modules)
+           (memq 'org-asana-browser org-asana-modules)
+           (fboundp 'org-asana-browse-workspace))
+      (call-interactively 'org-asana-browse-workspace)
+    (error "Task browser module not loaded. Add org-asana-browser to org-asana-modules")))
+
+(defun org-asana-attach ()
+  "Attach a file to the current task."
+  (interactive)
+  (if (and (boundp 'org-asana-modules)
+           (memq 'org-asana-attachments org-asana-modules)
+           (fboundp 'org-asana-attach-file))
+      (call-interactively 'org-asana-attach-file)
+    (error "Attachments module not loaded. Add org-asana-attachments to org-asana-modules")))
+
+(defun org-asana-assign ()
+  "Assign the current task to a user."
+  (interactive)
+  (if (and (boundp 'org-asana-modules)
+           (memq 'org-asana-users org-asana-modules)
+           (fboundp 'org-asana-assign-task))
+      (call-interactively 'org-asana-assign-task)
+    (error "Users module not loaded. Add org-asana-users to org-asana-modules")))
+
+(defun org-asana-show-dependencies ()
+  "Show dependencies for the current task."
+  (interactive)
+  (if (and (boundp 'org-asana-modules)
+           (memq 'org-asana-dependencies org-asana-modules)
+           (fboundp 'org-asana-show-task-dependencies))
+      (call-interactively 'org-asana-show-task-dependencies)
+    (error "Dependencies module not loaded. Add org-asana-dependencies to org-asana-modules")))
+
+(defun org-asana-cache-status ()
+  "Show cache statistics."
+  (interactive)
+  (if (and (boundp 'org-asana-modules)
+           (memq 'org-asana-cache org-asana-modules)
+           (fboundp 'org-asana-cache-statistics))
+      (call-interactively 'org-asana-cache-statistics)
+    (error "Cache module not loaded. Add org-asana-cache to org-asana-modules")))
 
 (provide 'org-asana)
 ;;; org-asana.el ends here
