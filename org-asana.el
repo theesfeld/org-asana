@@ -409,7 +409,7 @@ When enabled, changing TODO states will trigger a full sync."
   (let* ((task-gid (alist-get 'gid task))
          (metadata (gethash task-gid metadata-map))
          (properties (org-asana--task-to-properties task metadata))
-         (body-text (org-asana--format-task-body task metadata))
+         (body-text (org-asana--format-task-body properties metadata))
          (task-title (org-asana--format-task-title task)))
     (list :level level
           :title task-title
