@@ -96,10 +96,9 @@ If nil, will attempt to retrieve from authinfo."
   :type 'file
   :group 'org-asana)
 
-(defcustom org-asana-fetch-metadata nil
+(defcustom org-asana-fetch-metadata t
   "Whether to fetch comments and attachments for tasks.
-Note: Enabling this significantly slows down sync as it makes
-2 additional API calls per task (stories and attachments)."
+Uses the Asana Batch API to efficiently fetch metadata in parallel."
   :type 'boolean
   :group 'org-asana)
 
@@ -860,6 +859,22 @@ When enabled, changing TODO states will trigger a full sync."
       (cons (alist-get 'data stories)
             (alist-get 'data attachments)))))
 
+(defun org-asana--make-batch-request (actions)
+  "Make a batch request with ACTIONS list."
+  (org-asana--make-request
+   "POST"
+   "/batch"
+   `((actions . ,actions))))
+
+(defun org-asana--fetch-metadata-batch (task-ids)
+  "Fetch metadata for multiple TASK-IDS using batch API."
+  (let ((actions (cl-loop for task-id in task-ids
+                         append (list `((relative_path . ,(format "/tasks/%s/stories" task-id))
+                                       (method . "GET"))
+                                     `((relative_path . ,(format "/tasks/%s/attachments" task-id))
+                                       (method . "GET"))))))
+    (org-asana--make-batch-request actions)))
+
 ;;; Data Transformation Functions
 
 
@@ -1189,16 +1204,35 @@ When enabled, changing TODO states will trigger a full sync."
   "Fetch metadata for all TASKS and return as hash table."
   (let ((metadata (make-hash-table :test 'equal))
         (task-list (org-asana--ensure-list tasks))
-        (task-count 0)
         (total-tasks (length (org-asana--ensure-list tasks))))
-    (message "Fetching metadata for %d tasks (this may take a while)..." total-tasks)
-    (dolist (task task-list)
-      (let ((task-gid (alist-get 'gid task)))
-        (setq task-count (1+ task-count))
-        (message "Fetching metadata... [%d/%d]" task-count total-tasks)
-        (puthash task-gid
-                 (org-asana--fetch-task-metadata task-gid)
-                 metadata)))
+    (if (> total-tasks 0)
+        (progn
+          (message "Fetching metadata for %d tasks using batch API..." total-tasks)
+          ;; Process tasks in batches of 5 (10 API calls per batch: stories + attachments)
+          (let ((task-gids (mapcar (lambda (task) (alist-get 'gid task)) task-list))
+                (batch-size 5)
+                (batch-count 0))
+            (while task-gids
+              (let* ((batch-gids (seq-take task-gids batch-size))
+                     (remaining (seq-drop task-gids batch-size))
+                     (batch-results (alist-get 'data (org-asana--fetch-metadata-batch batch-gids)))
+                     (result-index 0))
+                (setq batch-count (1+ batch-count))
+                (message "Processing batch %d/%d..." 
+                        batch-count 
+                        (ceiling (/ (float total-tasks) batch-size)))
+                ;; Process batch results - pairs of (stories, attachments) for each task
+                (dolist (task-gid batch-gids)
+                  (let ((stories-result (nth result-index batch-results))
+                        (attachments-result (nth (1+ result-index) batch-results)))
+                    (when (and stories-result attachments-result)
+                      (puthash task-gid
+                               (cons (alist-get 'data (alist-get 'body stories-result))
+                                     (alist-get 'data (alist-get 'body attachments-result)))
+                               metadata))
+                    (setq result-index (+ result-index 2))))
+                (setq task-gids remaining)))))
+      (message "No tasks to fetch metadata for."))
     metadata))
 
 ;;; Utility Functions
