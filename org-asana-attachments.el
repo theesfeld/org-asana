@@ -235,8 +235,7 @@
           (let ((link (org-element-context)))
             (when (eq (org-element-type link) 'link)
               (let ((begin (org-element-property :begin link))
-                    (end (org-element-property :end link))
-                    (desc (org-element-property :raw-link link)))
+                    (end (org-element-property :end link)))
                 (delete-region begin end)
                 (insert (format "[[file:%s][%s]]" local-path
                                (alist-get 'name attachment)))))))))))

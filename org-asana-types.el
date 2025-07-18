@@ -243,10 +243,10 @@
   (insert (org-asana--format-task-title-with-type
            `((name . ,title)
              (resource_subtype . "section"))))
-    (org-set-property "ASANA-TASK-GID" "new")
-    (org-set-property "ASANA-TYPE" "section")
-    (org-set-property "ASANA-SEPARATOR" "t")
-    (message "Separator created. Run sync to create in Asana.")))
+  (org-set-property "ASANA-TASK-GID" "new")
+  (org-set-property "ASANA-TYPE" "section")
+  (org-set-property "ASANA-SEPARATOR" "t")
+  (message "Separator created. Run sync to create in Asana."))
 
 ;;; Filtering Functions
 
