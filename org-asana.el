@@ -1036,7 +1036,12 @@ If nil, will attempt to retrieve from authinfo."
   (insert ":PROPERTIES:\n")
   (dolist (prop properties)
     (when (cdr prop)
-      (insert ":" (car prop) ": " (cdr prop) "\n")))
+      (let ((value (cdr prop)))
+        (insert ":" (car prop) ": " 
+                (if (listp value)
+                    (mapconcat #'identity value ", ")
+                  value)
+                "\n"))))
   (insert ":END:\n"))
 
 (defun org-asana--insert-body (body)
