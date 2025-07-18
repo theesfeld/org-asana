@@ -410,9 +410,12 @@ When enabled, changing TODO states will trigger a full sync."
          (metadata (gethash task-gid metadata-map))
          (properties (org-asana--task-to-properties task metadata))
          (body-text (org-asana--format-task-body properties metadata))
-         (task-title (org-asana--format-task-title task)))
+         (task-title (org-asana--format-task-title task))
+         (completed (alist-get 'completed task))
+         (todo-keyword (if completed "DONE" "TODO")))
     (list :level level
           :title task-title
+          :todo-keyword todo-keyword
           :properties (org-asana--plist-to-alist properties)
           :body body-text)))
 
@@ -490,6 +493,62 @@ When enabled, changing TODO states will trigger a full sync."
                  (modified_at . ,modified-at))))
     (puthash gid task org-asana--org-tasks-table)))
 
+;;; Comment Parsing Functions
+
+(defun org-asana--extract-comment-gid (comment-line)
+  "Extract comment GID from COMMENT-LINE."
+  (when (string-match "\\[\\[asana-comment:\\([^]]+\\)\\]\\[" comment-line)
+    (match-string 1 comment-line)))
+
+(defun org-asana--extract-comment-text (comment-line)
+  "Extract comment text from COMMENT-LINE."
+  (cond
+   ;; Asana comment format: [[asana-comment:GID][DATE]] AUTHOR: TEXT
+   ((string-match "\\]: \\(.+\\)$" comment-line)
+    (match-string 1 comment-line))
+   ;; New comment format: [DATE]: TEXT
+   ((string-match "^\\[[-0-9 A-Za-z:]+\\]: \\(.+\\)$" comment-line)
+    (match-string 1 comment-line))))
+
+(defun org-asana--parse-comments-drawer ()
+  "Parse comments from current task's COMMENTS drawer."
+  (save-excursion
+    (when (org-asana--find-comments-drawer)
+      (let ((comments '())
+            (drawer-end (save-excursion
+                         (re-search-forward "^:END:$" nil t)
+                         (line-beginning-position))))
+        (while (and (< (point) drawer-end)
+                   (re-search-forward "^\\(.+\\)$" drawer-end t))
+          (let ((line (match-string 1)))
+            (cond
+             ;; Existing Asana comment
+             ((string-match "asana-comment:" line)
+              (push (cons (org-asana--extract-comment-gid line)
+                         (org-asana--extract-comment-text line))
+                    comments))
+             ;; New local comment
+             ((string-match "^\\[[-0-9 A-Za-z:]+\\]:" line)
+              (push (cons nil ; No GID for new comments
+                         (org-asana--extract-comment-text line))
+                    comments)))))
+        (nreverse comments)))))
+
+(defun org-asana--find-comments-drawer ()
+  "Find COMMENTS drawer in current entry."
+  (save-excursion
+    (org-back-to-heading t)
+    (let ((end (save-excursion (org-end-of-subtree t t))))
+      (re-search-forward "^:COMMENTS:$" end t))))
+
+(defun org-asana--get-task-comments (task-gid)
+  "Get all comments for TASK-GID from org buffer."
+  (save-excursion
+    (goto-char (point-min))
+    (when (re-search-forward (format ":ASANA-TASK-GID: %s" task-gid) nil t)
+      (when (org-asana--find-comments-drawer)
+        (org-asana--parse-comments-drawer)))))
+
 ;;; Comparison Functions
 
 (defun org-asana--task-modified-p (task-gid)
@@ -540,7 +599,8 @@ When enabled, changing TODO states will trigger a full sync."
   (org-asana--handle-new-tasks)
   (org-asana--handle-deleted-tasks)
   (org-asana--handle-modified-tasks)
-  (org-asana--handle-completed-tasks))
+  (org-asana--handle-completed-tasks)
+  (org-asana--handle-task-comments))
 
 (defun org-asana--handle-new-tasks ()
   "Handle tasks that are new from API."
@@ -565,20 +625,55 @@ When enabled, changing TODO states will trigger a full sync."
       (message "Found %d modified tasks" modified-count))))
 
 (defun org-asana--handle-completed-tasks ()
-  "Handle tasks completed locally that need sync to Asana."
-  (let ((completed-locally '()))
+  "Handle tasks with changed completion status that need sync to Asana."
+  (let ((completed-locally '())
+        (incomplete-locally '()))
     (maphash (lambda (gid org-task)
                (let ((api-task (gethash gid org-asana--tasks-table)))
-                 (when (and api-task
-                           (alist-get 'completed org-task)
-                           (not (alist-get 'completed api-task)))
-                   (push gid completed-locally))))
+                 (when api-task
+                   (let ((org-completed (alist-get 'completed org-task))
+                         (api-completed (alist-get 'completed api-task)))
+                     (cond
+                      ;; Task completed locally but not in Asana
+                      ((and org-completed (not api-completed))
+                       (push gid completed-locally))
+                      ;; Task incomplete locally but completed in Asana
+                      ((and (not org-completed) api-completed)
+                       (push gid incomplete-locally)))))))
              org-asana--org-tasks-table)
     (when completed-locally
       (message "Found %d tasks to mark complete in Asana"
                (length completed-locally))
       (dolist (gid completed-locally)
-        (org-asana--mark-task-complete gid)))))
+        (org-asana--mark-task-complete gid)))
+    (when incomplete-locally
+      (message "Found %d tasks to mark incomplete in Asana"
+               (length incomplete-locally))
+      (dolist (gid incomplete-locally)
+        (org-asana--mark-task-incomplete gid)))))
+
+(defun org-asana--handle-task-comments ()
+  "Handle new comments that need to be synced to Asana."
+  (when org-asana-fetch-metadata
+    (let ((new-comments-count 0))
+      (maphash (lambda (gid _org-task)
+                 (let ((new-comments (org-asana--find-new-comments gid)))
+                   (when new-comments
+                     (dolist (comment new-comments)
+                       (org-asana--create-comment gid comment)
+                       (cl-incf new-comments-count)))))
+               org-asana--org-tasks-table)
+      (when (> new-comments-count 0)
+        (message "Created %d new comments in Asana" new-comments-count)))))
+
+(defun org-asana--find-new-comments (task-gid)
+  "Find new comments for TASK-GID that don't have asana-comment links."
+  (let ((all-comments (org-asana--get-task-comments task-gid))
+        (new-comments '()))
+    (dolist (comment all-comments)
+      (unless (car comment) ; No GID means it's a new comment
+        (push (cdr comment) new-comments)))
+    (nreverse new-comments)))
 
 (defun org-asana--rebuild-org-file ()
   "Rebuild org file from updated hash tables."
@@ -600,7 +695,21 @@ When enabled, changing TODO states will trigger a full sync."
   (org-asana--make-request
    "PUT"
    (format "/tasks/%s" task-gid)
-   '((completed . t))))
+   '((data . ((completed . t))))))
+
+(defun org-asana--mark-task-incomplete (task-gid)
+  "Mark task with TASK-GID as incomplete in Asana."
+  (org-asana--make-request
+   "PUT"
+   (format "/tasks/%s" task-gid)
+   '((data . ((completed . nil))))))
+
+(defun org-asana--create-comment (task-gid comment-text)
+  "Create a comment on TASK-GID with COMMENT-TEXT."
+  (org-asana--make-request
+   "POST"
+   (format "/tasks/%s/stories" task-gid)
+   `((data . ((text . ,comment-text))))))
 
 ;;; Display and Query Functions
 
@@ -828,23 +937,30 @@ When enabled, changing TODO states will trigger a full sync."
       (list (alist-get 'gid user-data)
             (alist-get 'gid (car workspace-list))))))
 
+(defun org-asana--build-task-opt-fields ()
+  "Build opt_fields parameter for task API requests."
+  (concat "gid,name,notes,html_notes,completed,completed_at,"
+          "due_on,due_at,start_on,start_at,"
+          "created_at,modified_at,created_by.name,"
+          "assignee.name,assignee_status,"
+          "followers.name,num_likes,liked,"
+          "parent.gid,parent.name,num_subtasks,"
+          "tags.gid,tags.name,"
+          "memberships.project.gid,memberships.project.name,"
+          "memberships.section.gid,memberships.section.name,"
+          "permalink_url,resource_subtype"))
+
+(defun org-asana--build-task-search-endpoint (workspace-gid user-gid)
+  "Build task search endpoint for WORKSPACE-GID and USER-GID."
+  (format "/workspaces/%s/tasks/search?assignee.any=%s&completed=false&limit=100&opt_fields=%s"
+          workspace-gid user-gid (org-asana--build-task-opt-fields)))
+
 (defun org-asana--fetch-all-tasks ()
   "Fetch all incomplete tasks assigned to current user."
   (let* ((workspace-info (org-asana--fetch-workspace-info))
          (user-gid (car workspace-info))
          (workspace-gid (cadr workspace-info))
-         (opt-fields (concat "gid,name,notes,html_notes,completed,completed_at,"
-                            "due_on,due_at,start_on,start_at,"
-                            "created_at,modified_at,created_by.name,"
-                            "assignee.name,assignee_status,"
-                            "followers.name,num_likes,liked,"
-                            "parent.gid,parent.name,num_subtasks,"
-                            "tags.gid,tags.name,"
-                            "memberships.project.gid,memberships.project.name,"
-                            "memberships.section.gid,memberships.section.name,"
-                            "permalink_url,resource_subtype"))
-         (endpoint (format "/workspaces/%s/tasks/search?assignee.any=%s&completed=false&limit=100&opt_fields=%s"
-                          workspace-gid user-gid opt-fields)))
+         (endpoint (org-asana--build-task-search-endpoint workspace-gid user-gid)))
     (org-asana--fetch-paginated endpoint)))
 
 (defun org-asana--fetch-task-metadata (task-id)
@@ -1200,38 +1316,51 @@ When enabled, changing TODO states will trigger a full sync."
         (org-mode)))
     buffer))
 
+(defun org-asana--extract-task-gids (tasks)
+  "Extract GIDs from TASKS list."
+  (mapcar (lambda (task) (alist-get 'gid task))
+          (org-asana--ensure-list tasks)))
+
+(defun org-asana--calculate-batch-count (total batch-size)
+  "Calculate number of batches for TOTAL items with BATCH-SIZE."
+  (ceiling (/ (float total) batch-size)))
+
+(defun org-asana--process-metadata-batch-results (batch-gids batch-results metadata)
+  "Process BATCH-RESULTS for BATCH-GIDS and store in METADATA."
+  (let ((result-index 0))
+    (dolist (task-gid batch-gids)
+      (let ((stories-result (nth result-index batch-results))
+            (attachments-result (nth (1+ result-index) batch-results)))
+        (when (and stories-result attachments-result)
+          (puthash task-gid
+                   (cons (alist-get 'data (alist-get 'body stories-result))
+                         (alist-get 'data (alist-get 'body attachments-result)))
+                   metadata))
+        (setq result-index (+ result-index 2))))))
+
+(defun org-asana--fetch-metadata-for-batch (batch-gids batch-num total-batches metadata)
+  "Fetch metadata for BATCH-GIDS (batch BATCH-NUM of TOTAL-BATCHES) into METADATA."
+  (message "Processing batch %d/%d..." batch-num total-batches)
+  (let ((batch-results (alist-get 'data (org-asana--fetch-metadata-batch batch-gids))))
+    (org-asana--process-metadata-batch-results batch-gids batch-results metadata)))
+
 (defun org-asana--fetch-all-metadata (tasks)
   "Fetch metadata for all TASKS and return as hash table."
   (let ((metadata (make-hash-table :test 'equal))
-        (task-list (org-asana--ensure-list tasks))
-        (total-tasks (length (org-asana--ensure-list tasks))))
-    (if (> total-tasks 0)
-        (progn
-          (message "Fetching metadata for %d tasks using batch API..." total-tasks)
-          ;; Process tasks in batches of 5 (10 API calls per batch: stories + attachments)
-          (let ((task-gids (mapcar (lambda (task) (alist-get 'gid task)) task-list))
-                (batch-size 5)
-                (batch-count 0))
-            (while task-gids
-              (let* ((batch-gids (seq-take task-gids batch-size))
-                     (remaining (seq-drop task-gids batch-size))
-                     (batch-results (alist-get 'data (org-asana--fetch-metadata-batch batch-gids)))
-                     (result-index 0))
-                (setq batch-count (1+ batch-count))
-                (message "Processing batch %d/%d..." 
-                        batch-count 
-                        (ceiling (/ (float total-tasks) batch-size)))
-                ;; Process batch results - pairs of (stories, attachments) for each task
-                (dolist (task-gid batch-gids)
-                  (let ((stories-result (nth result-index batch-results))
-                        (attachments-result (nth (1+ result-index) batch-results)))
-                    (when (and stories-result attachments-result)
-                      (puthash task-gid
-                               (cons (alist-get 'data (alist-get 'body stories-result))
-                                     (alist-get 'data (alist-get 'body attachments-result)))
-                               metadata))
-                    (setq result-index (+ result-index 2))))
-                (setq task-gids remaining)))))
+        (task-gids (org-asana--extract-task-gids tasks))
+        (batch-size 5))
+    (if task-gids
+        (let ((total-batches (org-asana--calculate-batch-count 
+                             (length task-gids) batch-size))
+              (batch-num 0))
+          (message "Fetching metadata for %d tasks using batch API..." 
+                   (length task-gids))
+          (while task-gids
+            (let ((batch-gids (seq-take task-gids batch-size)))
+              (cl-incf batch-num)
+              (org-asana--fetch-metadata-for-batch 
+               batch-gids batch-num total-batches metadata)
+              (setq task-gids (seq-drop task-gids batch-size)))))
       (message "No tasks to fetch metadata for."))
     metadata))
 
@@ -1270,16 +1399,18 @@ When enabled, changing TODO states will trigger a full sync."
   (when (equal (alist-get 'type story) "comment")
     (let ((text (alist-get 'text story))
           (author (alist-get 'name (alist-get 'created_by story)))
-          (date (org-asana--format-timestamp (alist-get 'created_at story))))
-      (format "- %s (%s): %s" author date text))))
+          (date (org-asana--format-timestamp (alist-get 'created_at story)))
+          (gid (alist-get 'gid story)))
+      (format "[[asana-comment:%s][%s]] %s: %s" gid date author text))))
 
 (defun org-asana--format-comments-section (stories)
   "Format STORIES as comments section."
   (when (and stories org-asana-fetch-metadata (> (length stories) 0))
     (let ((comments (delq nil (mapcar #'org-asana--format-single-comment stories))))
       (when comments
-        (concat "\n***** Comments\n"
-                (mapconcat #'identity comments "\n"))))))
+        (concat "\n:COMMENTS:\n"
+                (mapconcat #'identity comments "\n")
+                "\n:END:")))))
 
 (defun org-asana--format-task-body (props metadata)
   "Format task body from PROPS and METADATA."
@@ -1320,6 +1451,44 @@ When enabled, changing TODO states will trigger a full sync."
     (write-region "" nil org-asana-org-file)))
 
 ;;; Interactive Commands
+
+;;;###autoload
+(defun org-asana-add-comment ()
+  "Add a comment to the current task."
+  (interactive)
+  (let ((task-gid (org-entry-get (point) "ASANA-TASK-GID")))
+    (unless task-gid
+      (error "Not on an Asana task"))
+    (let ((comment-text (read-string "Comment: ")))
+      (when (and comment-text (not (string-empty-p comment-text)))
+        (org-asana--add-comment-to-drawer comment-text)
+        (message "Comment added. Run sync to send to Asana.")))))
+
+(defun org-asana--add-comment-to-drawer (comment-text)
+  "Add COMMENT-TEXT to current task's COMMENTS drawer."
+  (save-excursion
+    (org-back-to-heading t)
+    (let ((has-drawer (org-asana--find-comments-drawer)))
+      (if has-drawer
+        (org-asana--append-to-comments-drawer comment-text)
+        (org-asana--create-comments-drawer comment-text)))))
+
+(defun org-asana--append-to-comments-drawer (comment-text)
+  "Append COMMENT-TEXT to existing COMMENTS drawer."
+  (re-search-forward "^:END:$" nil t)
+  (beginning-of-line)
+  (insert (format "%s: %s\n" 
+                 (format-time-string "[%Y-%m-%d %a %H:%M]")
+                 comment-text)))
+
+(defun org-asana--create-comments-drawer (comment-text)
+  "Create COMMENTS drawer with COMMENT-TEXT."
+  (org-end-of-meta-data t)
+  (insert ":COMMENTS:\n")
+  (insert (format "%s: %s\n"
+                 (format-time-string "[%Y-%m-%d %a %H:%M]")
+                 comment-text))
+  (insert ":END:\n"))
 
 ;;;###autoload
 (defun org-asana-sync ()
