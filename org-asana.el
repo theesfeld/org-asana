@@ -764,8 +764,7 @@ If nil, will attempt to retrieve from authinfo."
 
 (defun org-asana--make-request (method endpoint &optional data)
   "Make an API request to METHOD ENDPOINT with optional DATA."
-  (unless org-asana-token
-    (signal 'org-asana-auth-error '("No Asana token configured. Set `org-asana-token'")))
+  (org-asana--validate-token)
   (org-asana--check-rate-limit)
   (let* ((url (org-asana--build-request-url endpoint))
          (headers (org-asana--build-request-headers))
