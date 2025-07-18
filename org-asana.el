@@ -223,9 +223,24 @@ If nil, will attempt to retrieve from authinfo."
 
 ;;; Task Storage Functions
 
+(defun org-asana--validate-task-data (task)
+  "Validate and sanitize TASK data."
+  (when task
+    (let ((gid (alist-get 'gid task)))
+      (unless (and gid (stringp gid))
+        (error "Invalid task: missing or non-string GID"))
+      ;; Ensure all expected fields are strings if present
+      (dolist (field '(name notes permalink_url))
+        (let ((value (alist-get field task)))
+          (when (and value (not (stringp value)))
+            (error "Invalid task field %s: expected string, got %s" 
+                   field (type-of value)))))
+      t)))
+
 (defun org-asana--store-task (task)
   "Store TASK in tasks table."
-  (puthash (alist-get 'gid task) task org-asana--tasks-table))
+  (when (org-asana--validate-task-data task)
+    (puthash (alist-get 'gid task) task org-asana--tasks-table)))
 
 (defun org-asana--get-task (gid)
   "Get task by GID."
@@ -1038,9 +1053,15 @@ If nil, will attempt to retrieve from authinfo."
     (when (cdr prop)
       (let ((value (cdr prop)))
         (insert ":" (car prop) ": " 
-                (if (listp value)
-                    (mapconcat #'identity value ", ")
-                  value)
+                (cond
+                 ;; If value is a string, insert it directly
+                 ((stringp value) value)
+                 ;; If value is a list of strings, join them
+                 ((and (listp value)
+                       (cl-every #'stringp value))
+                  (mapconcat #'identity value ", "))
+                 ;; For any other type, convert to string
+                 (t (format "%s" value)))
                 "\n"))))
   (insert ":END:\n"))
 
